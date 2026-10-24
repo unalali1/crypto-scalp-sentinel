@@ -35,6 +35,9 @@ class BinanceClient:
             if isinstance(result, dict) and result.get("code", 0) < 0:
                 raise BinanceError(f"Binance API error {result['code']} on {path}")
             return result
+        except requests.HTTPError as exc:
+            code = getattr(exc.response, "status_code", "unknown")
+            raise BinanceError(f"Binance HTTP {code} at {path}") from None
         except (requests.RequestException, ValueError) as exc:
             raise BinanceError(f"Binance read failed on {path}: {type(exc).__name__}") from None
 
