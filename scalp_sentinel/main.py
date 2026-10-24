@@ -10,6 +10,7 @@ from .config import Config
 from .engine import evaluate
 from .notifier import format_signal, send_telegram
 from .storage import Cooldowns
+from .tracker import track_signals
 
 log = logging.getLogger("sentinel")
 
@@ -33,6 +34,11 @@ def main():
         raise RuntimeError("Telegram token, chat id and PostgreSQL DATABASE_URL required in live mode")
 
     client = BinanceClient(cfg.base_url)
+    if not cfg.dry_run:
+        try:
+            track_signals(cfg.database_url, client)
+        except Exception as exc:
+            log.error("tracking_run_failed kind=%s", type(exc).__name__)
     exchange = client.symbol_info()
     symbols = [sym for sym in cfg.symbols if sym in exchange]
     if not symbols:
@@ -87,7 +93,7 @@ def main():
                 log.info("DRY_RUN paper signal:\n%s", msg)
             else:
                 send_telegram(cfg.telegram_token, cfg.telegram_chat_id, msg)
-                storage.mark_sent(sig.symbol, sig.side)
+                storage.mark_sent(sig.symbol, sig.side, signal=sig)
                 log.info("telegram_sent symbol=%s side=%s score=%s", sig.symbol, sig.side, sig.score)
             sent += 1
     finally:
