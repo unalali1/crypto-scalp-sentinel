@@ -15,6 +15,8 @@ class Cooldowns:
                 symbol TEXT NOT NULL, side TEXT NOT NULL, last_sent_epoch BIGINT NOT NULL,
                 PRIMARY KEY (symbol, side))""")
             self.conn.commit()
+            from .tracker import init_db
+            init_db(self.conn)
         else:
             self.conn = sqlite3.connect(":memory:")
             self.conn.execute("""CREATE TABLE IF NOT EXISTS scalp_signal_cooldowns (
@@ -29,7 +31,10 @@ class Cooldowns:
             (symbol, side)).fetchone()
         return row is None or time.time() - int(row[0]) >= cooldown_minutes * 60
 
-    def mark_sent(self, symbol, side):
+    def mark_sent(self, symbol, side, signal=None):
+        if signal is not None and self.is_pg:
+            from .tracker import record_sent
+            record_sent(self.conn, signal, int(time.time() * 1000))
         placeholder = "%s" if self.is_pg else "?"
         self.conn.execute(
             f"INSERT INTO scalp_signal_cooldowns(symbol, side, last_sent_epoch) "
