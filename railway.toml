@@ -1,0 +1,7 @@
+[build]
+builder = "RAILPACK"
+
+[deploy]
+startCommand = "python -m scalp_sentinel.main"
+cronSchedule = "*/15 * * * *"
+restartPolicyType = "NEVER"
