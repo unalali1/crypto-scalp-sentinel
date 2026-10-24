@@ -100,5 +100,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        logging.getLogger("sentinel").error("run_failed kind=%s", type(exc).__name__)
+        logging.getLogger("sentinel").error("run_failed kind=%s reason=%s", type(exc).__name__, str(exc)[:160])
         sys.exit(1)
