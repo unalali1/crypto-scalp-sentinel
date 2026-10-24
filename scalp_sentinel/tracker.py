@@ -43,6 +43,14 @@ DDL = """CREATE TABLE IF NOT EXISTS scalp_signal_outcomes (
 
 def init_db(conn):
     conn.execute(DDL)
+    conn.execute("""CREATE OR REPLACE VIEW scalp_signal_performance AS
+        SELECT id, symbol, side, signal_ts, sent_at_ms, score,
+               entry_price, stop_price, tp1_price, tp2_price,
+               status, filled_at_ms, tp1_at_ms, tp2_at_ms, stop_at_ms,
+               (tp1_at_ms IS NOT NULL) AS tp1_success,
+               (tp2_at_ms IS NOT NULL) AS tp2_success,
+               finished_at_ms, updated_at
+        FROM scalp_signal_outcomes""")
     conn.commit()
 
 
