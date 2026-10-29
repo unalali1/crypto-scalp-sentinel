@@ -25,6 +25,7 @@ class Config:
     max_stop_atr: float
     cooldown_minutes: int
     max_signals_per_run: int
+    v2_enabled: bool
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -44,4 +45,5 @@ class Config:
             max_stop_atr=float(os.getenv("MAX_STOP_ATR", 3.0)),
             cooldown_minutes=int(os.getenv("COOLDOWN_MINUTES", 90)),
             max_signals_per_run=int(os.getenv("MAX_SIGNALS_PER_RUN", 3)),
+            v2_enabled=bool_env("V2_ENABLED", True),
         )

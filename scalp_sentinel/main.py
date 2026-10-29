@@ -26,6 +26,7 @@ def scan_one(client, symbol, details, config, now_ms):
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = Config.from_env()
+    log.info("engine_version=%s", "v2" if cfg.v2_enabled else "v1")
     if cfg.score_threshold not in (5, 6):
         raise ValueError("SCORE_THRESHOLD must be 5 or 6")
     if cfg.max_stop_atr < cfg.min_stop_atr:
@@ -85,7 +86,7 @@ def main():
         for sig in valid:
             if sent >= cfg.max_signals_per_run:
                 break
-            if not storage.allowed(sig.symbol, sig.side, cfg.cooldown_minutes):
+            if not storage.allowed(sig.symbol, sig.side, max(cfg.cooldown_minutes, 240 if sig.side == "SHORT" else 180) if cfg.v2_enabled else cfg.cooldown_minutes):
                 log.info("cooldown_skip symbol=%s side=%s", sig.symbol, sig.side)
                 continue
             msg = format_signal(sig, cfg.timezone)

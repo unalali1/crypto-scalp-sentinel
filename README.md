@@ -53,3 +53,22 @@ ORDER BY symbol, side;
 These are hypothetical signal-path results, not real exchange fills or returns.
 Fees, slippage and funding are excluded. Old Telegram alerts are not
 automatically backfilled.
+
+## V2 confirmation engine (2026-10-29)
+
+Default: `V2_ENABLED=true`. Set `V2_ENABLED=false` to revert engine
+selection without deleting the original implementation. Version is recorded per
+delivered signal; V1 historical rows remain unchanged.
+
+V2 requires 15m/1h/4h EMA trend agreement; a recently CLOSED 5m breakout;
+subsequent 1m retest and rejection (never a breakout-only chase); strengthening
+taker-volume delta and appropriate open interest; ATR-compatible stops; and
+sufficient room to TP1 before confirmed hourly swing congestion. Short alerts
+also require RVOL >= 1.0. Volume above MIN_RVOL boosts the six-condition score,
+but is not mandatory for otherwise confirmed longs. Cooldowns: at least 180m
+long / 240m short.
+
+V2 trade journaling models break-even stop after TP1 (TP1_THEN_BREAKEVEN),
+while V1 open entries retain their historical semantics. These remain paper
+signals, not live fills or validated P&L. The closed 1m reference touch model
+is unchanged and execution quality must be evaluated separately.

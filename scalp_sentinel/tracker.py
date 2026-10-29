@@ -37,19 +37,21 @@ DDL = """CREATE TABLE IF NOT EXISTS scalp_signal_outcomes (
     last_checked_ms BIGINT NOT NULL,
     finished_at_ms BIGINT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    strategy_version TEXT NOT NULL DEFAULT 'v1',
     UNIQUE(symbol, side, signal_ts)
 )"""
 
 
 def init_db(conn):
     conn.execute(DDL)
+    conn.execute("ALTER TABLE scalp_signal_outcomes ADD COLUMN IF NOT EXISTS strategy_version TEXT NOT NULL DEFAULT 'v1'")
     conn.execute("""CREATE OR REPLACE VIEW scalp_signal_performance AS
         SELECT id, symbol, side, signal_ts, sent_at_ms, score,
                entry_price, stop_price, tp1_price, tp2_price,
                status, filled_at_ms, tp1_at_ms, tp2_at_ms, stop_at_ms,
                (tp1_at_ms IS NOT NULL) AS tp1_success,
                (tp2_at_ms IS NOT NULL) AS tp2_success,
-               finished_at_ms, updated_at
+               finished_at_ms, updated_at, strategy_version
         FROM scalp_signal_outcomes""")
     conn.commit()
 
@@ -61,19 +63,21 @@ def record_sent(conn, signal, sent_at_ms):
         """INSERT INTO scalp_signal_outcomes
         (symbol, side, signal_ts, sent_at_ms, entry_price, stop_price,
          tp1_price, tp2_price, score, checks_json, rvol, cvd,
-         oi_change_pct, last_checked_ms)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s)
+         oi_change_pct, last_checked_ms, strategy_version)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s)
         ON CONFLICT (symbol, side, signal_ts) DO NOTHING""",
         (signal.symbol, signal.side, signal.snapshot_ts, sent_at_ms,
          signal.entry, signal.stop, signal.tp1, signal.tp2, signal.score,
          json.dumps(signal.checks), signal.rvol, signal.cvd3,
-         signal.oi_change_pct, first_full_minute - MINUTE),
+         signal.oi_change_pct, first_full_minute - MINUTE,
+         getattr(signal, "strategy_version", "v1")),
     )
 
 
 COLUMNS = ("id", "symbol", "side", "sent_at_ms", "entry_price", "stop_price",
            "tp1_price", "tp2_price", "status", "filled_at_ms", "tp1_at_ms",
-           "tp2_at_ms", "stop_at_ms", "last_checked_ms", "finished_at_ms")
+           "tp2_at_ms", "stop_at_ms", "last_checked_ms", "finished_at_ms",
+           "strategy_version")
 
 
 def touched(low, high, level):
@@ -120,7 +124,9 @@ def advance_trade(trade, candles):
                 trade["status"] = "TP1_TIMEOUT" if state == "TP1_HIT" else "TIMEOUT"
                 trade["finished_at_ms"] = opened
             else:
-                stop_hit = high >= stop if short else low <= stop
+                effective_stop = (entry if state == "TP1_HIT" and
+                                  trade.get("strategy_version", "v1") == "v2" else stop)
+                stop_hit = high >= effective_stop if short else low <= effective_stop
                 tp1_hit = low <= tp1 if short else high >= tp1
                 tp2_hit = low <= tp2 if short else high >= tp2
                 if state == "OPEN":
@@ -149,7 +155,9 @@ def advance_trade(trade, candles):
                         trade["finished_at_ms"] = opened
                     elif stop_hit:
                         trade["stop_at_ms"] = opened
-                        trade["status"] = "TP1_THEN_STOP"
+                        trade["status"] = ("TP1_THEN_BREAKEVEN" if
+                                           trade.get("strategy_version", "v1") == "v2"
+                                           else "TP1_THEN_STOP")
                         trade["finished_at_ms"] = opened
         trade["last_checked_ms"] = opened
         if trade["status"] not in ACTIVE:
