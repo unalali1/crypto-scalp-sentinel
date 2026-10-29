@@ -17,9 +17,9 @@ def format_signal(signal, tz):
     dt = datetime.fromtimestamp(signal.snapshot_ts / 1000, tz=timezone.utc).astimezone(ZoneInfo(tz))
     rows = [
         f"{title} | {signal.symbol}",
-        f"Altı koşul: {signal.score}/6 | {dt:%Y-%m-%d %H:%M} ({tz})",
+        f"Scalp Sentinel {getattr(signal, 'strategy_version', 'v1').upper()} | Altı koşul: {signal.score}/6 | {dt:%Y-%m-%d %H:%M} ({tz})",
         "",
-        f"Giriş referansı: {fmt_price(entry, signal.tick_size)} USDT (son kapanmış 1dk)",
+        f"Giriş referansı: {fmt_price(entry, signal.tick_size)} USDT (son kapanmış 1dk, piyasa emri değildir)",
         f"Stop: {fmt_price(stop, signal.tick_size)} USDT | Fiyat riski: %{risk_pct:.2f}",
         f"TP1 (1.5R): {fmt_price(signal.tp1, signal.tick_size)} USDT",
         f"TP2 (2.5R): {fmt_price(signal.tp2, signal.tick_size)} USDT",
