@@ -9,7 +9,7 @@ Create a Railway service from this repository. A `railway.toml` sets the cron to
 
 Set `DRY_RUN=true` for initial data tests. To activate notifications later, set `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` and PostgreSQL `DATABASE_URL` securely in Railway, then change `DRY_RUN=false`. Never commit secrets. A database is needed for durable cooldown when enabling real notifications.
 
-The first watchlist is BTC, ETH, SOL, BNB, XRP, AVAX, LINK, NEAR, AAVE, ZEC and ENA. Trading criteria and thresholds are an **unvalidated hypothesis**, not financial advice or a backtested strategy.
+The default 17-symbol watchlist is BTC, ETH, SOL, BNB, XRP, AVAX, LINK, NEAR, AAVE, ZEC, ENA, HYPE, SUI, DOGE, LTC, WLD and BIO. Trading criteria and thresholds are an **unvalidated hypothesis**, not financial advice or a backtested strategy.
 
 ## Tests
 `python -m unittest discover -s tests -v`
