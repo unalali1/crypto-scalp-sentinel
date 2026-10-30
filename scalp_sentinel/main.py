@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from .binance_client import BinanceClient
+from .binance_client import BinanceClient, BinanceError
 from .config import Config
 from .engine import evaluate
 from .execution import prepare
@@ -73,7 +73,8 @@ class Runner:
                 except Exception as exc:
                     self.snapshots.pop(sym,None)
                     errors.append(sym)
-                    log.warning('snapshot_failed symbol=%s kind=%s',sym,type(exc).__name__)
+                    log.warning('snapshot_failed symbol=%s kind=%s reason=%s',sym,type(exc).__name__,
+                                str(exc)[:160] if isinstance(exc,BinanceError) else 'unavailable')
         if full:
             self.watch={sym for sym,signals in candidates.items()
                         if any(s.checks['15m trend'] and s.checks['5m structure'] for s in signals)}
