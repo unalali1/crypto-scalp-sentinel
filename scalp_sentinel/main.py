@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from .binance_client import BinanceClient, BinanceError
+from .binance_client import BinanceClient, BinanceError, DataPending
 from .config import Config
 from .engine import evaluate
 from .execution import prepare
@@ -29,6 +29,7 @@ class Runner:
         self.journal=Journal(self.storage.conn if self.storage.is_pg else None)
         self.snapshots={}
         self.watch=set()
+        self.pending=set()
         self.full_bucket=None
         self.exchange={}
         self.clock_offset=0
@@ -52,13 +53,14 @@ class Runner:
         symbols=[s for s in cfg.symbols if s in self.exchange]
         if not symbols:
             raise RuntimeError('No supported configured symbols')
-        wanted=set(symbols) if full else self.watch & set(symbols)
+        wanted=set(symbols) if full else (self.watch | self.pending) & set(symbols)
         wanted.add('BTCUSDT')
         # Open shadow exposures must have current correlation context too.
         for peer in self.journal.active('v3-shadow')+self.journal.active('primary'):
             wanted.add(peer['symbol'])
         candidates={}
         errors=[]
+        pending=[]
         with ThreadPoolExecutor(max_workers=3) as pool:
             jobs={pool.submit(self.client.snapshot,s,now_ms):s for s in wanted if s in self.exchange}
             for future in as_completed(jobs):
@@ -70,6 +72,10 @@ class Runner:
                     self.snapshots[sym]=snap
                     if sym in symbols:
                         candidates[sym]=evaluate(sym,snap,tick,cfg)
+                except DataPending as exc:
+                    self.snapshots.pop(sym,None)
+                    pending.append(sym)
+                    log.info('data_pending symbol=%s reason=%s',sym,str(exc))
                 except Exception as exc:
                     self.snapshots.pop(sym,None)
                     errors.append(sym)
@@ -79,6 +85,15 @@ class Runner:
             self.watch={sym for sym,signals in candidates.items()
                         if any(s.checks['15m trend'] and s.checks['5m structure'] for s in signals)}
             self.full_bucket=now_ms//300000
+            self.pending=set(pending+errors)
+        else:
+            self.pending.difference_update(wanted)
+            self.pending.update(pending+errors)
+            for sym,signals in candidates.items():
+                if any(s.checks['15m trend'] and s.checks['5m structure'] for s in signals):
+                    self.watch.add(sym)
+                else:
+                    self.watch.discard(sym)
         primary=[]
         shadow=[]
         control=[]
@@ -112,8 +127,8 @@ class Runner:
         shadow_count=self.deliver(shadow,'v3-shadow',now_ms) if cfg.shadow_enabled else 0
         if cfg.shadow_enabled:
             self.deliver(control,'v2-control-15m',now_ms)
-        log.info('scan_finished mode=%s full=%s scanned=%d watching=%d eligible=%d delivered=%d shadow=%d failed=%d',
-                 cfg.primary_strategy,full,len(candidates),len(self.watch),len(primary),sent,shadow_count,len(errors))
+        log.info('scan_finished mode=%s full=%s scanned=%d watching=%d eligible=%d delivered=%d shadow=%d failed=%d pending=%d',
+                 cfg.primary_strategy,full,len(candidates),len(self.watch),len(primary),sent,shadow_count,len(errors),len(pending))
         # Outcome catch-up follows time-sensitive notifications, never delays
         # entry preparation. A tracking error fails closed on open exposure.
         if not cfg.dry_run:
@@ -204,6 +219,7 @@ def main():
                  cfg.primary_strategy,cfg.shadow_enabled,cfg.continuous,len(cfg.symbols))
         failures=0
         while not stop.is_set():
+            started=time.time()
             try:
                 runner.tick()
                 failures=0
@@ -216,7 +232,7 @@ def main():
             if not cfg.continuous:
                 break
             # A small publication allowance after each UTC minute boundary.
-            delay=60-(time.time()%60)+3
+            delay=max(.1,(int(started//60)+1)*60+3-time.time())
             stop.wait(delay)
     finally:
         runner.close()

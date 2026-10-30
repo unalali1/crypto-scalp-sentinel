@@ -12,6 +12,8 @@ HYPE, SUI, DOGE, LTC, WLD and BIO. Thresholds are unvalidated hypotheses.
 2. **Timing:** discover on each 5m boundary; monitor candidates on each closed
    1m bar. Cache higher timeframes until their next boundary. BTC context and
    open exposure context are refreshed too. No full-watchlist reload each minute.
+   Delayed flow/OI publication is a no-trade pending state, retried the next
+   minute without relaxing freshness or discarding valid higher-timeframe candles.
 3. **V3 shadow:** compare breakout expansion, retest contraction, renewed
    trigger volume, normalized taker delta, aligned 5m OI, trend/range/shock
    regime, BTC context and side-adjusted return correlation. No extra Telegram

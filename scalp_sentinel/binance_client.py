@@ -11,6 +11,13 @@ class BinanceError(RuntimeError):
     pass
 
 
+class DataPending(BinanceError):
+    """Published statistics have not caught up; skip trading and retry later."""
+    def __init__(self, symbol, dataset, age_ms, count):
+        self.dataset=dataset
+        super().__init__(f"{symbol} pending {dataset} age_ms={age_ms} records={count}")
+
+
 class BinanceClient:
     def __init__(self, base_url):
         self.base_url = base_url
@@ -98,8 +105,9 @@ class BinanceClient:
             for key,duration,lag in (("taker",300000,300000),("oi",900000,0),("oi5",300000,0)):
                 rows=sorted((r for r in out[key] if int(r["timestamp"])+lag<=now_ms),
                             key=lambda r:int(r["timestamp"]))
-                if len(rows)<6 or now_ms-(int(rows[-1]["timestamp"])+lag)>duration+90000:
-                    raise BinanceError(f"{symbol} stale/missing {key}")
+                age=now_ms-(int(rows[-1]["timestamp"])+lag) if rows else None
+                if len(rows)<6 or age>duration+90000:
+                    raise DataPending(symbol,key,age,len(rows))
                 if any(int(b["timestamp"])-int(a["timestamp"])!=duration for a,b in zip(rows,rows[1:])):
                     raise BinanceError(f"{symbol} noncontiguous {key}")
                 out[key]=rows
@@ -109,6 +117,13 @@ class BinanceClient:
                     raise BinanceError(f"{symbol} invalid {key}")
             out["asof_ms"]=now_ms
             return out
+        except DataPending as exc:
+            # Publication can lag a boundary. Keep valid candles cached, but
+            # retry the delayed statistics next minute without relaxing freshness.
+            with self._cache_lock:
+                for key in ('taker','oi','oi5'):
+                    self._cache.pop((symbol,key),None)
+            raise
         except Exception:
             # Allow the next minute to retry a delayed publication in the
             # same bucket instead of retaining a stale cached response.

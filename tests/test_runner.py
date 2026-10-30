@@ -8,9 +8,28 @@ from scalp_sentinel.engine import candidate
 from test_v2_engine import fixture
 from test_execution_research import config
 from test_client import FakeClient
+from scalp_sentinel.binance_client import DataPending
 
 
 class Delivery(unittest.TestCase):
+    def test_pending_discovery_is_retried_next_minute(self):
+        client=FakeClient()
+        r=Runner(config(symbols=('TEST','BTCUSDT')),client)
+        original=client.snapshot
+        def snapshot(sym,now):
+            if sym=='TEST' and now==client.now:
+                raise DataPending(sym,'oi5',500000,40)
+            return original(sym,now)
+        try:
+            with patch.object(client,'snapshot',side_effect=snapshot),patch('scalp_sentinel.main.time.time',return_value=client.now/1000):
+                r.tick(client.now)
+            self.assertIn('TEST',r.pending)
+            client.now+=60000
+            with patch('scalp_sentinel.main.time.time',return_value=client.now/1000):
+                r.tick(client.now)
+            self.assertNotIn('TEST',r.pending)
+            self.assertIn('TEST',r.snapshots)
+        finally:r.close()
     def test_worker_discovers_five_minute_and_only_monitors_candidates_between(self):
         client=FakeClient()
         r=Runner(config(symbols=('TEST','BTCUSDT')),client)

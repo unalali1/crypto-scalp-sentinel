@@ -1,5 +1,5 @@
 import unittest
-from scalp_sentinel.binance_client import BinanceClient, BinanceError
+from scalp_sentinel.binance_client import BinanceClient, BinanceError, DataPending
 
 
 class FakeClient(BinanceClient):
@@ -44,4 +44,22 @@ class ClientTests(unittest.TestCase):
             c=FakeClient()
             setattr(c,flag,True)
             with self.assertRaises(BinanceError):c.snapshot('TEST',c.now)
-            self.assertFalse(c._cache)
+            if flag=='gap':self.assertFalse(c._cache)
+            else:self.assertNotIn(('TEST','taker'),c._cache)
+
+    def test_delayed_publication_retries_flow_without_reloading_all_candles(self):
+        c=FakeClient()
+        c.stale=True
+        with self.assertRaises(DataPending):c.snapshot('TEST',c.now)
+        self.assertIn(('TEST','4h'),c._cache)
+        self.assertNotIn(('TEST','taker'),c._cache)
+        # Model all statistics catching up; cached stale OI is retried too.
+        c.stale=False
+        for _ in range(3):
+            try:
+                s=c.snapshot('TEST',c.now)
+                break
+            except DataPending:
+                continue
+        else:self.fail('publication did not recover')
+        self.assertTrue(s['taker'])
