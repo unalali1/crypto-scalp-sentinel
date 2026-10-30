@@ -2,9 +2,13 @@
 from .config import Config
 from .storage import Cooldowns
 from .journal import Journal
+import unittest
 
 
 def main():
+    suite=unittest.defaultTestLoader.discover('tests')
+    if not unittest.TextTestRunner(verbosity=1).run(suite).wasSuccessful():
+        raise RuntimeError('preflight_tests_failed')
     cfg=Config.from_env()
     cfg.validate()
     if not cfg.dry_run:

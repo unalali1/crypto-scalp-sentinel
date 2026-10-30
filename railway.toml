@@ -3,6 +3,6 @@ builder = "RAILPACK"
 
 [deploy]
 startCommand = "python -m scalp_sentinel.main"
-preDeployCommand = ["python -m unittest discover -s tests -q", "python -m scalp_sentinel.verify"]
+preDeployCommand = ["python -m scalp_sentinel.verify"]
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
