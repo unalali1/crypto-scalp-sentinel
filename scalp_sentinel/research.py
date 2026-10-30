@@ -73,6 +73,7 @@ def candidate_v3(symbol, side, snapshot, tick, cfg, btc):
     s.eligible = all(checks.values())
     s.research = dict(context, breakout_rvol=breakout_volume, delta_ratio=current,
                       oi15_pct=oi15, oi_regime="expansion" if oi15 is not None and oi15 >= 0 else "contraction")
+    s.research.update({k:snapshot.get(k) for k in ('flow_source','oi_age_ms','oi5_age_ms')})
     return s
 
 

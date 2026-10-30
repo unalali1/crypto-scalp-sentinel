@@ -14,6 +14,10 @@ HYPE, SUI, DOGE, LTC, WLD and BIO. Thresholds are unvalidated hypotheses.
    open exposure context are refreshed too. No full-watchlist reload each minute.
    Delayed flow/OI publication is a no-trade pending state, retried the next
    minute without relaxing freshness or discarding valid higher-timeframe candles.
+   Taker delta now comes directly from closed Binance 5m klines (base volume
+   minus taker-buy volume yields taker-sell volume). This avoids delayed taker
+   statistics and removes that extra HTTP request. Flow source and OI ages are
+   recorded with new signals; OI freshness gates remain enforced.
 3. **V3 shadow:** compare breakout expansion, retest contraction, renewed
    trigger volume, normalized taker delta, aligned 5m OI, trend/range/shock
    regime, BTC context and side-adjusted return correlation. No extra Telegram

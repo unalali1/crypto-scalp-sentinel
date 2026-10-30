@@ -106,6 +106,7 @@ class Runner:
             for s in signals:
                 s.strategy_version='v2.1'
                 s.research=regime(snap)
+                s.research.update({k:snap.get(k) for k in ('flow_source','oi_age_ms','oi5_age_ms')})
                 if cfg.shadow_enabled or cfg.primary_strategy=='v3':
                     v3=candidate_v3(sym,s.side,snap,snap['tick_size'],cfg,btc)
                     if v3:

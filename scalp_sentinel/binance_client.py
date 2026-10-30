@@ -79,8 +79,8 @@ class BinanceClient:
                     "/fapi/v1/klines",symbol=symbol,interval=tf,limit=140)
                 for tf,duration in durations.items()
             }
-            for key, period, duration in (("taker","5m",300000),("oi","15m",900000),("oi5","5m",300000)):
-                path = "/futures/data/takerlongshortRatio" if key=="taker" else "/futures/data/openInterestHist"
+            for key, period, duration in (("oi","15m",900000),("oi5","5m",300000)):
+                path = "/futures/data/openInterestHist"
                 req[key] = pool.submit(self.cached,(symbol,key),now_ms//duration,path,
                     symbol=symbol,period=period,limit=40)
             req["ticker"] = pool.submit(self.cached,(symbol,"ticker"),now_ms//300000,
@@ -100,8 +100,21 @@ class BinanceClient:
                         raise BinanceError(f"{symbol} invalid {tf} candle")
                 if any(int(b[0])-int(a[0])!=duration for a,b in zip(rows,rows[1:])):
                     raise BinanceError(f"{symbol} noncontiguous {tf}")
-            # Taker timestamps identify interval starts; conservatively use
-            # completed intervals only. OI timestamps are point observations.
+            # Binance USD-M klines contain total base volume at [5] and
+            # taker-buy base volume at [9]. Derive sell volume from the same
+            # CLOSED candle, avoiding the delayed statistical endpoint and
+            # an extra HTTP call. Do not substitute a price-direction proxy.
+            out['taker']=[]
+            for row in out['5m'][-40:]:
+                if len(row)<10:
+                    raise BinanceError(f'{symbol} missing kline taker volume')
+                total,buy=float(row[5]),float(row[9])
+                if not isfinite(buy) or not 0<=buy<=total:
+                    raise BinanceError(f'{symbol} invalid kline taker volume')
+                out['taker'].append(dict(timestamp=int(row[0]),buyVol=buy,sellVol=total-buy))
+            out['flow_source']='closed_5m_kline_taker_volume'
+            # Derived taker timestamps identify interval starts; OI timestamps
+            # are point observations. Never admit future/unclosed intervals.
             for key,duration,lag in (("taker",300000,300000),("oi",900000,0),("oi5",300000,0)):
                 rows=sorted((r for r in out[key] if int(r["timestamp"])+lag<=now_ms),
                             key=lambda r:int(r["timestamp"]))
@@ -116,6 +129,8 @@ class BinanceClient:
                        for r in rows for f in fields):
                     raise BinanceError(f"{symbol} invalid {key}")
             out["asof_ms"]=now_ms
+            out['oi_age_ms']=now_ms-int(out['oi'][-1]['timestamp'])
+            out['oi5_age_ms']=now_ms-int(out['oi5'][-1]['timestamp'])
             return out
         except DataPending as exc:
             # Publication can lag a boundary. Keep valid candles cached, but

@@ -17,7 +17,7 @@ class FakeClient(BinanceClient):
         if path.endswith('klines'):
             d={'1m':60000,'5m':300000,'15m':900000,'1h':3600000,'4h':14400000}[params['interval']]
             end=self.now//d*d
-            rows=[[end-(140-i)*d,'100','101','99','100','10',end-(139-i)*d-1] for i in range(140)]
+            rows=[[end-(140-i)*d,'100','101','99','100','10',end-(139-i)*d-1,'1000',10,'6','600','0'] for i in range(140)]
             if self.gap: rows.pop(100)
             return rows
         if 'Hist' in path or 'Ratio' in path:
@@ -29,6 +29,13 @@ class FakeClient(BinanceClient):
 
 
 class ClientTests(unittest.TestCase):
+    def test_taker_delta_comes_from_closed_volume_not_delayed_endpoint(self):
+        c=FakeClient()
+        s=c.snapshot('TEST',c.now)
+        self.assertEqual(s['taker'][-1]['buyVol'],6)
+        self.assertEqual(s['taker'][-1]['sellVol'],4)
+        self.assertEqual(s['flow_source'],'closed_5m_kline_taker_volume')
+        self.assertFalse(any('takerlongshortRatio' in path for path,_ in c.calls))
     def test_cache_reuses_higher_timeframes_between_minutes(self):
         c=FakeClient()
         a=c.snapshot('TEST',c.now)
