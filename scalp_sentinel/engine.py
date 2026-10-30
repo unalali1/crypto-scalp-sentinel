@@ -281,6 +281,8 @@ def _v2_candidate(symbol, direction, snapshot, tick_size, cfg):
     baseline.tp1, baseline.tp2 = tp1, tp2
     baseline.entry_trigger, baseline.eligible = level, eligible
     baseline.strategy_version = "v2"
+    baseline.setup_id = f"{symbol}:{direction}:{breakout.ts}:{level}" if breakout else ""
+    baseline.breakout_ts = breakout.ts if breakout else None
     return baseline
 
 
@@ -288,3 +290,4 @@ def candidate(symbol, direction, snapshot, tick_size, cfg):
     if not getattr(cfg, "v2_enabled", False):
         return candidate_v1(symbol, direction, snapshot, tick_size, cfg)
     return _v2_candidate(symbol, direction, snapshot, tick_size, cfg)
+

@@ -27,6 +27,42 @@ class Config:
     max_signals_per_run: int
     v2_enabled: bool
 
+    continuous: bool = False
+    primary_strategy: str = "v2.1"
+    shadow_enabled: bool = True
+    entry_window_minutes: int = 5
+    max_hold_minutes: int = 360
+    max_entry_drift_atr: float = 0.20
+    fee_bps: float = 5.0
+    slippage_bps: float = 2.0
+    max_cost_r: float = 0.25
+    max_open_signals: int = 3
+    correlation_threshold: float = 0.80
+    archive_days: int = 30
+    breakout_rvol: float = 1.15
+    min_delta_ratio: float = 0.05
+    min_efficiency: float = 0.25
+
+    def validate(self):
+        if self.primary_strategy not in ("v2.1", "v3"):
+            raise ValueError("PRIMARY_STRATEGY must be v2.1 or v3")
+        if self.score_threshold not in (5,6) or self.min_stop_atr <= 0 or self.max_stop_atr < self.min_stop_atr:
+            raise ValueError("Invalid signal thresholds")
+        if not 2 <= self.entry_window_minutes <= 10 or not 30 <= self.max_hold_minutes <= 1440:
+            raise ValueError("Invalid paper entry/hold window")
+        if not 0 < self.max_entry_drift_atr <= .5 or not 0 < self.max_cost_r <= .5:
+            raise ValueError("Invalid execution limits")
+        if not 0 <= self.fee_bps <= 100 or not 0 <= self.slippage_bps <= 100:
+            raise ValueError("Invalid cost assumptions")
+        if not 1 <= self.max_open_signals <= 10 or not 1 <= self.max_signals_per_run <= 10:
+            raise ValueError("Invalid signal limits")
+        if not .5 <= self.correlation_threshold <= 1 or not 1 <= self.archive_days <= 90:
+            raise ValueError("Invalid correlation/retention")
+        if not 0 < self.min_efficiency <= 1 or not 0 < self.min_delta_ratio <= 1 or self.breakout_rvol < 1:
+            raise ValueError("Invalid research thresholds")
+        if not self.dry_run and not (self.telegram_token and self.telegram_chat_id and self.database_url):
+            raise ValueError("Telegram and PostgreSQL configuration required")
+
     @classmethod
     def from_env(cls) -> "Config":
         return cls(
@@ -46,4 +82,20 @@ class Config:
             cooldown_minutes=int(os.getenv("COOLDOWN_MINUTES", 90)),
             max_signals_per_run=int(os.getenv("MAX_SIGNALS_PER_RUN", 3)),
             v2_enabled=bool_env("V2_ENABLED", True),
+            continuous=bool_env("RUN_CONTINUOUS", False),
+            primary_strategy=os.getenv("PRIMARY_STRATEGY", "v2.1"),
+            shadow_enabled=bool_env("SHADOW_ENABLED", True),
+            entry_window_minutes=int(os.getenv("ENTRY_WINDOW_MINUTES", 5)),
+            max_hold_minutes=int(os.getenv("MAX_HOLD_MINUTES", 360)),
+            max_entry_drift_atr=float(os.getenv("MAX_ENTRY_DRIFT_ATR", .20)),
+            fee_bps=float(os.getenv("PAPER_FEE_BPS", 5)),
+            slippage_bps=float(os.getenv("PAPER_SLIPPAGE_BPS", 2)),
+            max_cost_r=float(os.getenv("MAX_COST_R", .25)),
+            max_open_signals=int(os.getenv("MAX_OPEN_SIGNALS", 3)),
+            correlation_threshold=float(os.getenv("CORRELATION_THRESHOLD", .80)),
+            archive_days=int(os.getenv("ARCHIVE_DAYS", 30)),
+            breakout_rvol=float(os.getenv("BREAKOUT_RVOL", 1.15)),
+            min_delta_ratio=float(os.getenv("MIN_DELTA_RATIO", .05)),
+            min_efficiency=float(os.getenv("MIN_EFFICIENCY", .25)),
         )
+
