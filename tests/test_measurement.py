@@ -23,6 +23,13 @@ class Measurement(unittest.TestCase):
         x = advance_trade(t,[bar(i,100.5,100.1) for i in range(1,5)])
         self.assertEqual(x["status"], "NO_ENTRY")
 
+    def test_candle_straddling_expiry_cannot_create_late_fill(self):
+        t=paper('v2.1')
+        t['journal_json']={'cost_model':'paper-v1','entry_window_ms':180000}
+        x=advance_trade(t,[bar(1,100.5,100.1),bar(2,100.5,100.1),bar(3,100.2,99.9)])
+        self.assertEqual(x['status'],'NO_ENTRY')
+        self.assertIsNone(x['filled_at_ms'])
+
     def test_partial_exit_economics_and_funding(self):
         t=paper("v2.1")
         t.update(status="TP1_THEN_BREAKEVEN",filled_at_ms=60000,
@@ -41,3 +48,15 @@ class Measurement(unittest.TestCase):
         t=paper("v2.1")
         t.update(symbol="TEST",status="TP2_HIT",journal_json={"net_r_low":2,"costs_complete":False})
         self.assertEqual(summarize([t])[0]["resolved"],0)
+
+    def test_gap_stop_and_timeout_do_not_get_ideal_prices(self):
+        t=paper('v2.1')
+        t.update(status='OPEN',filled_at_ms=60000,last_checked_ms=60000,
+                 journal_json={'cost_model':'paper-v1','fee_bps':0,'slippage_bps':0,'max_hold_ms':360000})
+        x=advance_trade(t,[[120000,'98','98.5','97.5','98.2']])
+        self.assertEqual(x['status'],'STOPPED')
+        self.assertEqual(x['journal_json']['net_r_low'],-2)
+        t['journal_json']['max_hold_ms']=60000
+        y=advance_trade(t,[[120000,'100.2','101','99.5','100.9']])
+        self.assertEqual(y['status'],'TIMEOUT')
+        self.assertAlmostEqual(y['journal_json']['net_r_low'],.2)

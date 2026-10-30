@@ -53,7 +53,7 @@ def init_db(conn):
                status, filled_at_ms, tp1_at_ms, tp2_at_ms, stop_at_ms,
                (tp1_at_ms IS NOT NULL) AS tp1_success,
                (tp2_at_ms IS NOT NULL) AS tp2_success,
-               finished_at_ms, updated_at, strategy_version, journal_json
+               finished_at_ms, updated_at, strategy_version
         FROM scalp_signal_outcomes""")
     conn.commit()
 
@@ -99,6 +99,8 @@ def advance_trade(trade, candles):
     policy = trade["journal_json"]
     modern = trade.get("strategy_version", "v1") != "v1"
     entry_window = policy.get("entry_window_ms", ENTRY_WINDOW_MS)
+    entry_deadline = min(trade["sent_at_ms"]+entry_window,
+                         policy.get("expires_at_ms",trade["sent_at_ms"]+entry_window))
     max_hold = policy.get("max_hold_ms", MAX_HOLD_MS)
     short = trade["side"] == "SHORT"
     entry, stop = trade["entry_price"], trade["stop_price"]
@@ -114,7 +116,7 @@ def advance_trade(trade, candles):
             raise ValueError("invalid 1m candle")
         state = trade["status"]
         if state == "AWAITING_ENTRY":
-            if opened >= trade["sent_at_ms"] + entry_window:
+            if opened >= entry_deadline or (policy.get("cost_model") and opened+MINUTE>entry_deadline):
                 trade["status"] = "NO_ENTRY"
                 trade["finished_at_ms"] = opened
             elif modern and ((high >= stop if short else low <= stop) or
@@ -148,6 +150,9 @@ def advance_trade(trade, candles):
                         trade["finished_at_ms"] = opened
                     elif stop_hit:
                         trade["status"] = "STOPPED"
+                        opening=float(candle[1])
+                        if policy.get("cost_model") and opening>0:
+                            policy["exit_price"] = max(opening,stop) if short else min(opening,stop)
                         trade["stop_at_ms"] = opened
                         trade["finished_at_ms"] = opened
                     elif tp1_hit:
@@ -178,6 +183,9 @@ def advance_trade(trade, candles):
                                            modern
                                            else "TP1_THEN_STOP")
                         trade["finished_at_ms"] = opened
+                        opening=float(candle[1])
+                        if policy.get("cost_model") and opening>0:
+                            policy["exit_price"] = max(opening,effective_stop) if short else min(opening,effective_stop)
         trade["last_checked_ms"] = opened
         if trade.get("filled_at_ms") is not None:
             sign = -1 if short else 1
@@ -188,8 +196,9 @@ def advance_trade(trade, candles):
         if trade["status"] not in ACTIVE:
             if policy.get("cost_model"):
                 from .performance import outcome_bounds
-                # Close at the last observed close for explicit timeout exits.
-                close = float(candle[4]) if len(candle) > 4 else entry
+                # A scheduled time exit executes at the first observed open
+                # at/after the deadline, not a later close chosen with hindsight.
+                close = float(candle[1]) if "TIMEOUT" in trade["status"] else float(candle[4])
                 policy.update(outcome_bounds(trade, close))
             break
     return trade

@@ -13,10 +13,12 @@ def outcome_bounds(trade, close):
     full = fraction * r1 + (1 - fraction) * r2
     partial = fraction * r1
     mark = side * (close - entry) / risk
+    exit_r=side*(p.get("exit_price",stop)-entry)/risk
+    remainder_r=side*(p.get("exit_price",entry)-entry)/risk
     states = {
-        "STOPPED": (-1, -1), "TP2_HIT": (full, full),
-        "TP1_THEN_BREAKEVEN": (partial, partial),
-        "TP1_THEN_STOP": (partial - (1-fraction), partial - (1-fraction)),
+        "STOPPED": (exit_r, exit_r), "TP2_HIT": (full, full),
+        "TP1_THEN_BREAKEVEN": (partial+(1-fraction)*remainder_r,) * 2,
+        "TP1_THEN_STOP": (partial+(1-fraction)*exit_r,) * 2,
         "TIMEOUT": (mark, mark),
         "TP1_TIMEOUT": (partial + (1-fraction)*mark,) * 2,
         "AMBIGUOUS_ENTRY": (-1, full), "AMBIGUOUS_EXIT": (-1, full),
@@ -25,7 +27,7 @@ def outcome_bounds(trade, close):
     if trade["status"] not in states:
         return {"net_r_low": None, "net_r_high": None, "costs_complete": True}
     low, high = states[trade["status"]]
-    # Explicit conservative notional-cost allowance on both sides. Funding
+    # Explicit estimated notional-cost allowance on both sides. Funding
     # is resolved separately from exchange history, never silently assumed 0.
     cost = 2 * (p.get("fee_bps", 5) + p.get("slippage_bps", 2)) / 10000 * entry / risk
     return {"gross_r_low": low, "gross_r_high": high,
