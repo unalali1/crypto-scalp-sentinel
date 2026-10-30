@@ -38,6 +38,7 @@ DDL = """CREATE TABLE IF NOT EXISTS scalp_signal_outcomes (
     finished_at_ms BIGINT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     strategy_version TEXT NOT NULL DEFAULT 'v1',
+    journal_json JSONB NOT NULL DEFAULT '{}',
     UNIQUE(symbol, side, signal_ts)
 )"""
 
@@ -45,13 +46,14 @@ DDL = """CREATE TABLE IF NOT EXISTS scalp_signal_outcomes (
 def init_db(conn):
     conn.execute(DDL)
     conn.execute("ALTER TABLE scalp_signal_outcomes ADD COLUMN IF NOT EXISTS strategy_version TEXT NOT NULL DEFAULT 'v1'")
+    conn.execute("ALTER TABLE scalp_signal_outcomes ADD COLUMN IF NOT EXISTS journal_json JSONB NOT NULL DEFAULT '{}'")
     conn.execute("""CREATE OR REPLACE VIEW scalp_signal_performance AS
         SELECT id, symbol, side, signal_ts, sent_at_ms, score,
                entry_price, stop_price, tp1_price, tp2_price,
                status, filled_at_ms, tp1_at_ms, tp2_at_ms, stop_at_ms,
                (tp1_at_ms IS NOT NULL) AS tp1_success,
                (tp2_at_ms IS NOT NULL) AS tp2_success,
-               finished_at_ms, updated_at, strategy_version
+               finished_at_ms, updated_at, strategy_version, journal_json
         FROM scalp_signal_outcomes""")
     conn.commit()
 
@@ -63,21 +65,22 @@ def record_sent(conn, signal, sent_at_ms):
         """INSERT INTO scalp_signal_outcomes
         (symbol, side, signal_ts, sent_at_ms, entry_price, stop_price,
          tp1_price, tp2_price, score, checks_json, rvol, cvd,
-         oi_change_pct, last_checked_ms, strategy_version)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s)
+         oi_change_pct, last_checked_ms, strategy_version, journal_json)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s::jsonb)
         ON CONFLICT (symbol, side, signal_ts) DO NOTHING""",
         (signal.symbol, signal.side, signal.snapshot_ts, sent_at_ms,
          signal.entry, signal.stop, signal.tp1, signal.tp2, signal.score,
          json.dumps(signal.checks), signal.rvol, signal.cvd3,
          signal.oi_change_pct, first_full_minute - MINUTE,
-         getattr(signal, "strategy_version", "v1")),
+         getattr(signal, "strategy_version", "v1"),
+         json.dumps(getattr(signal, "journal", {}))),
     )
 
 
 COLUMNS = ("id", "symbol", "side", "sent_at_ms", "entry_price", "stop_price",
            "tp1_price", "tp2_price", "status", "filled_at_ms", "tp1_at_ms",
            "tp2_at_ms", "stop_at_ms", "last_checked_ms", "finished_at_ms",
-           "strategy_version")
+           "strategy_version", "journal_json")
 
 
 def touched(low, high, level):
@@ -92,6 +95,11 @@ def advance_trade(trade, candles):
     cannot establish the correct sequence from OHLC data alone.
     """
     trade = dict(trade)
+    trade["journal_json"] = dict(trade.get("journal_json") or {})
+    policy = trade["journal_json"]
+    modern = trade.get("strategy_version", "v1") != "v1"
+    entry_window = policy.get("entry_window_ms", ENTRY_WINDOW_MS)
+    max_hold = policy.get("max_hold_ms", MAX_HOLD_MS)
     short = trade["side"] == "SHORT"
     entry, stop = trade["entry_price"], trade["stop_price"]
     tp1, tp2 = trade["tp1_price"], trade["tp2_price"]
@@ -106,8 +114,13 @@ def advance_trade(trade, candles):
             raise ValueError("invalid 1m candle")
         state = trade["status"]
         if state == "AWAITING_ENTRY":
-            if opened >= trade["sent_at_ms"] + ENTRY_WINDOW_MS:
+            if opened >= trade["sent_at_ms"] + entry_window:
                 trade["status"] = "NO_ENTRY"
+                trade["finished_at_ms"] = opened
+            elif modern and ((high >= stop if short else low <= stop) or
+                             (policy.get("invalidate_target_before_entry", False)
+                              and (low <= tp1 if short else high >= tp1))) and not touched(low, high, entry):
+                trade["status"] = "INVALIDATED"
                 trade["finished_at_ms"] = opened
             elif touched(low, high, entry):
                 # Entry was reached; only subsequent candles can establish a
@@ -120,12 +133,12 @@ def advance_trade(trade, candles):
                     trade["status"] = "OPEN"
                     trade["filled_at_ms"] = opened
         elif state in ("OPEN", "TP1_HIT"):
-            if opened >= trade["filled_at_ms"] + MAX_HOLD_MS:
+            if opened >= trade["filled_at_ms"] + max_hold:
                 trade["status"] = "TP1_TIMEOUT" if state == "TP1_HIT" else "TIMEOUT"
                 trade["finished_at_ms"] = opened
             else:
                 effective_stop = (entry if state == "TP1_HIT" and
-                                  trade.get("strategy_version", "v1") == "v2" else stop)
+                                  modern else stop)
                 stop_hit = high >= effective_stop if short else low <= effective_stop
                 tp1_hit = low <= tp1 if short else high >= tp1
                 tp2_hit = low <= tp2 if short else high >= tp2
@@ -139,7 +152,13 @@ def advance_trade(trade, candles):
                         trade["finished_at_ms"] = opened
                     elif tp1_hit:
                         trade["tp1_at_ms"] = opened
-                        if tp2_hit:
+                        # TP1 activates break-even immediately. OHLC cannot
+                        # order TP1 -> entry -> TP2 within this same candle.
+                        be_touched = high >= entry if short else low <= entry
+                        if modern and be_touched:
+                            trade["status"] = "TP1_AMBIGUOUS_EXIT"
+                            trade["finished_at_ms"] = opened
+                        elif tp2_hit:
                             trade["tp2_at_ms"] = opened
                             trade["status"] = "TP2_HIT"
                             trade["finished_at_ms"] = opened
@@ -156,11 +175,22 @@ def advance_trade(trade, candles):
                     elif stop_hit:
                         trade["stop_at_ms"] = opened
                         trade["status"] = ("TP1_THEN_BREAKEVEN" if
-                                           trade.get("strategy_version", "v1") == "v2"
+                                           modern
                                            else "TP1_THEN_STOP")
                         trade["finished_at_ms"] = opened
         trade["last_checked_ms"] = opened
+        if trade.get("filled_at_ms") is not None:
+            sign = -1 if short else 1
+            risk = abs(entry - stop)
+            if risk:
+                policy["mfe_r"] = max(policy.get("mfe_r", 0), sign * ((low if short else high) - entry) / risk)
+                policy["mae_r"] = max(policy.get("mae_r", 0), -sign * ((high if short else low) - entry) / risk)
         if trade["status"] not in ACTIVE:
+            if policy.get("cost_model"):
+                from .performance import outcome_bounds
+                # Close at the last observed close for explicit timeout exits.
+                close = float(candle[4]) if len(candle) > 4 else entry
+                policy.update(outcome_bounds(trade, close))
             break
     return trade
 
@@ -170,10 +200,10 @@ def _persist(conn, trade):
         """UPDATE scalp_signal_outcomes SET
         status=%s, filled_at_ms=%s, tp1_at_ms=%s, tp2_at_ms=%s,
         stop_at_ms=%s, last_checked_ms=%s, finished_at_ms=%s,
-        updated_at=NOW() WHERE id=%s""",
+        journal_json=%s::jsonb, updated_at=NOW() WHERE id=%s""",
         (trade["status"], trade["filled_at_ms"], trade["tp1_at_ms"],
          trade["tp2_at_ms"], trade["stop_at_ms"], trade["last_checked_ms"],
-         trade["finished_at_ms"], trade["id"]),
+         trade["finished_at_ms"], json.dumps(trade.get("journal_json", {})), trade["id"]),
     )
     conn.commit()
 
@@ -230,3 +260,4 @@ def track_signals(database_url, client, now_ms=None):
                 log.warning("track_failed id=%s symbol=%s kind=%s",
                             trade["id"], trade["symbol"], type(exc).__name__)
         log.info("tracking_finished active_checked=%d resolved=%d", len(rows), resolved)
+
