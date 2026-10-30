@@ -217,7 +217,7 @@ def _persist(conn, trade):
     conn.commit()
 
 
-def track_signals(database_url, client, now_ms=None):
+def track_signals(database_url, client, now_ms=None, initialize=True):
     """Resume every outstanding signal from its saved 1m candle cursor.
 
     Binance allows up to 1000 candles per request; progress is committed
@@ -228,7 +228,8 @@ def track_signals(database_url, client, now_ms=None):
         now_ms = int(time.time() * 1000)
     last_closed_open = ((now_ms - 2000) // MINUTE - 1) * MINUTE
     with psycopg.connect(database_url, connect_timeout=8) as conn:
-        init_db(conn)
+        if initialize:
+            init_db(conn)
         rows = conn.execute(
             "SELECT " + ",".join(COLUMNS) +
             " FROM scalp_signal_outcomes WHERE status IN (%s,%s,%s)"

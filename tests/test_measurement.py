@@ -1,10 +1,19 @@
 import unittest
+from unittest.mock import patch,MagicMock
 from scalp_sentinel.tracker import advance_trade
 from scalp_sentinel.performance import outcome_bounds, settle_funding, summarize
 from test_v2_tracker import paper, bar
 
 
 class Measurement(unittest.TestCase):
+    def test_continuous_tracking_does_not_repeat_schema_ddl(self):
+        from scalp_sentinel.tracker import track_signals
+        conn=MagicMock()
+        conn.execute.return_value.fetchall.return_value=[]
+        with patch('psycopg.connect') as connect,patch('scalp_sentinel.tracker.init_db') as ddl:
+            connect.return_value.__enter__.return_value=conn
+            track_signals('unused',MagicMock(),now_ms=1000000,initialize=False)
+            ddl.assert_not_called()
     def test_stop_before_fill_invalidates_v2(self):
         x = advance_trade(paper("v2"), [bar(1,99.5,98.5),bar(2,100.2,99.9)])
         self.assertEqual(x["status"], "INVALIDATED")

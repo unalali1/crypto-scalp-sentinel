@@ -117,7 +117,7 @@ class Runner:
         # Outcome catch-up follows time-sensitive notifications, never delays
         # entry preparation. A tracking error fails closed on open exposure.
         if not cfg.dry_run:
-            track_signals(cfg.database_url,self.client,now_ms=int(time.time()*1000))
+            track_signals(cfg.database_url,self.client,now_ms=int(time.time()*1000),initialize=False)
             self.journal.track_shadows(self.client,int(time.time()*1000))
             self.journal.settle_primary(self.client,int(time.time()*1000))
         if self.last_prune!=now_ms//3600000:

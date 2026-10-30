@@ -15,7 +15,9 @@ def main():
         storage=Cooldowns(cfg.database_url,False)
         try:
             Journal(storage.conn)
-            storage.conn.execute('SELECT * FROM scalp_signal_performance LIMIT 0')
+            # Avoid taking view locks in reverse order to a concurrent old
+            # worker's legacy migration (table -> view). Query the table only.
+            storage.conn.execute('SELECT id,journal_json FROM scalp_signal_outcomes LIMIT 0')
             storage.conn.commit()
         finally:
             storage.close()
