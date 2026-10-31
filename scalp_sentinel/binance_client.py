@@ -55,7 +55,7 @@ class BinanceClient:
         data = self.get("/fapi/v1/exchangeInfo")
         return {
             r["symbol"]: r for r in data["symbols"]
-            if r.get("contractType") == "PERPETUAL"
+            if r.get("contractType") in ("PERPETUAL", "TRADIFI_PERPETUAL")
             and r.get("quoteAsset") == "USDT"
             and r.get("status") == "TRADING"
         }

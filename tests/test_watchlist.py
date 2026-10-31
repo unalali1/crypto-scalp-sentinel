@@ -10,16 +10,16 @@ EXPECTED = (
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
     "AVAXUSDT", "LINKUSDT", "NEARUSDT", "AAVEUSDT", "ZECUSDT",
     "ENAUSDT", "HYPEUSDT", "SUIUSDT", "DOGEUSDT", "LTCUSDT",
-    "WLDUSDT", "BIOUSDT",
+    "WLDUSDT", "BIOUSDT", "XAUUSDT", "XAGUSDT", "BZUSDT",
 )
 
 
 class DefaultWatchlist(unittest.TestCase):
-    def test_new_watchlist_has_17_unique_contracts(self):
+    def test_new_watchlist_has_20_unique_contracts(self):
         self.assertEqual(tuple(DEFAULT_SYMBOLS.split(",")), EXPECTED)
-        self.assertEqual(len(set(EXPECTED)), 17)
+        self.assertEqual(len(set(EXPECTED)), 20)
 
-    def test_environment_default_uses_all_17(self):
+    def test_environment_default_uses_all_20(self):
         with patch.dict(os.environ, {"SYMBOLS": ""}, clear=False):
             # An explicitly empty override means no configured symbols.
             self.assertEqual(Config.from_env().symbols, ())

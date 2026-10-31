@@ -1,8 +1,9 @@
 # Crypto Scalp Sentinel
 
-Read-only Binance USDT perpetual scanner. **No exchange orders and no OpenAI calls.**
-Default watchlist: BTC, ETH, SOL, BNB, XRP, AVAX, LINK, NEAR, AAVE, ZEC, ENA,
-HYPE, SUI, DOGE, LTC, WLD and BIO. Thresholds are unvalidated hypotheses.
+Read-only Binance USDⓈ-M perpetual scanner for crypto and TradFi markets.
+**No exchange orders and no OpenAI calls.** Default watchlist includes 17 crypto
+pairs plus XAUUSDT (gold), XAGUSDT (silver) and BZUSDT (Brent crude). Thresholds
+are unvalidated hypotheses.
 
 ## 2026-10-30 staged improvement
 
