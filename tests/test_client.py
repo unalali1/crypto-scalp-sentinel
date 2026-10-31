@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 from scalp_sentinel.binance_client import BinanceClient, BinanceError, DataPending
 
 
@@ -30,6 +31,19 @@ class FakeClient(BinanceClient):
 
 
 class ClientTests(unittest.TestCase):
+    def test_symbol_info_includes_tradfi_perpetuals(self):
+        c=BinanceClient("unused")
+        symbols=[
+            {"symbol":"BTCUSDT","contractType":"PERPETUAL","quoteAsset":"USDT","status":"TRADING"},
+            {"symbol":"XAUUSDT","contractType":"TRADIFI_PERPETUAL","quoteAsset":"USDT","status":"TRADING"},
+            {"symbol":"XAGUSDT","contractType":"TRADIFI_PERPETUAL","quoteAsset":"USDT","status":"TRADING"},
+            {"symbol":"BZUSDT","contractType":"TRADIFI_PERPETUAL","quoteAsset":"USDT","status":"TRADING"},
+            {"symbol":"OLDUSDT","contractType":"TRADIFI_PERPETUAL","quoteAsset":"USDT","status":"SETTLING"},
+            {"symbol":"BTCUSD","contractType":"PERPETUAL","quoteAsset":"USD","status":"TRADING"},
+        ]
+        with patch.object(c,"get",return_value={"symbols":symbols}):
+            self.assertEqual(set(c.symbol_info()),{"BTCUSDT","XAUUSDT","XAGUSDT","BZUSDT"})
+
     def test_taker_delta_comes_from_closed_volume_not_delayed_endpoint(self):
         c=FakeClient()
         s=c.snapshot('TEST',c.now)
