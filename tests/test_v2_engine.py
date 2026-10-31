@@ -1,7 +1,7 @@
 """V2 closed-candle retest, cross-timeframe, and risk regression tests."""
 import unittest
 from types import SimpleNamespace
-from scalp_sentinel.engine import candidate
+from scalp_sentinel.engine import candidate, prefilter_rejections
 
 
 def fixture(side="LONG"):
@@ -68,6 +68,12 @@ class V2Engine(unittest.TestCase):
         x=candidate("TEST","SHORT",s,"0.001",c)
         self.assertTrue(x.eligible,x.checks)
         self.assertTrue(x.stop > x.entry > x.tp1 > x.tp2)
+    def test_prefilter_diagnostics_identify_liquidity_and_spread(self):
+        s,c=fixture("LONG")
+        s["ticker"]["quoteVolume"]="1"
+        s["book"]={"bidPrice":"100","askPrice":"101"}
+        self.assertEqual(set(prefilter_rejections(s,c)),{"quote_volume","spread"})
+
     def test_no_retest_blocks(self):
         s,c=fixture("LONG")
         for row in s["1m"][-6:-1]:
