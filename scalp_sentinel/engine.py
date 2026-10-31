@@ -152,6 +152,27 @@ def evaluate(symbol, snapshot, tick_size, cfg):
             output.append(signal)
     return output
 
+def prefilter_rejections(snapshot, cfg):
+    """Explain why the shared market-data/liquidity prefilter returns no candidates."""
+    reasons=[]
+    try:
+        bid,ask=float(snapshot["book"]["bidPrice"]),float(snapshot["book"]["askPrice"])
+        if bid<=0 or ask<=bid:
+            reasons.append("invalid_book")
+        else:
+            spread=(ask-bid)/((ask+bid)/2)*10_000
+            if spread>cfg.max_spread_bps:
+                reasons.append("spread")
+        if float(snapshot["ticker"]["quoteVolume"])<cfg.min_quote_volume_usdt:
+            reasons.append("quote_volume")
+        if len(snapshot["taker"])<6:
+            reasons.append("insufficient_taker_flow")
+        if len(snapshot["oi"])<5:
+            reasons.append("insufficient_15m_oi")
+    except (KeyError,TypeError,ValueError,ZeroDivisionError):
+        reasons.append("invalid_market_fields")
+    return reasons
+
 # V2 is deliberately separate from the original six-check engine, enabling
 # deterministic regression comparisons and immediate code rollback.
 candidate_v1 = candidate
