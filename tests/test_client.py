@@ -9,6 +9,7 @@ class FakeClient(BinanceClient):
         self.calls=[]
         self.gap=False
         self.stale=False
+        self.stale_oi5=False
     def symbol_info(self):
         return {s:{'filters':[{'filterType':'PRICE_FILTER','tickSize':'0.01'}]} for s in ('TEST','BTCUSDT')}
     def get(self,path,**params):
@@ -22,7 +23,7 @@ class FakeClient(BinanceClient):
             return rows
         if 'Hist' in path or 'Ratio' in path:
             d=300000 if params['period']=='5m' else 900000
-            end=self.now//d*d-(10*d if self.stale else 0)
+            end=self.now//d*d-(10*d if self.stale or (d==300000 and self.stale_oi5) else 0)
             return [dict(timestamp=end-(39-i)*d,buyVol='12',sellVol='10',sumOpenInterest='1000') for i in range(40)]
         if 'bookTicker' in path:return {'bidPrice':'100','askPrice':'100.01'}
         return {'quoteVolume':'50000000'}
@@ -36,6 +37,14 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(s['taker'][-1]['sellVol'],4)
         self.assertEqual(s['flow_source'],'closed_5m_kline_taker_volume')
         self.assertFalse(any('takerlongshortRatio' in path for path,_ in c.calls))
+    def test_delayed_v3_oi5_does_not_block_primary_snapshot(self):
+        c=FakeClient()
+        c.stale_oi5=True
+        s=c.snapshot("TEST",c.now)
+        self.assertTrue(s["oi"])
+        self.assertFalse(s["oi5_available"])
+        self.assertIn("pending oi5",s["oi5_pending_reason"])
+
     def test_cache_reuses_higher_timeframes_between_minutes(self):
         c=FakeClient()
         a=c.snapshot('TEST',c.now)

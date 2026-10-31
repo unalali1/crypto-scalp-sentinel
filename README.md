@@ -76,6 +76,15 @@ when cooldown expires. An active signal blocks another signal in that symbol,
 including an opposing direction. V3's additional filters initially run only in
 shadow; the primary engine does not claim their benefit before comparison.
 
+## Scanner diagnostics
+
+Each evaluated symbol now logs its side-specific failed gates and each scan
+logs aggregate gate pass/fail counts, prefilter rejection reasons, and data
+pending counts. This separates a quiet market from unavailable inputs or a
+specific strategy condition. Delayed 5m OI is isolated to the V3 shadow cohort;
+it no longer blocks a v2.1 primary snapshot. A stale 15m OI input still fails
+closed for v2.1 because its CVD/OI gate depends on that series.
+
 ## Entry and outcome semantics
 
 The notification is a **paper limit-reference setup**, not a market order.
