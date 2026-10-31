@@ -9,7 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .binance_client import BinanceClient, BinanceError, DataPending
 from .config import Config
-from .engine import evaluate
+from .engine import evaluate, prefilter_rejections
 from .execution import prepare
 from .journal import Journal
 from .notifier import format_signal, send_telegram
@@ -61,6 +61,11 @@ class Runner:
         candidates={}
         errors=[]
         pending=[]
+        data_pending_counts={}
+        gate_pass={}
+        gate_fail={}
+        prefilter_counts={}
+        evaluated_sides=0
         with ThreadPoolExecutor(max_workers=3) as pool:
             jobs={pool.submit(self.client.snapshot,s,now_ms):s for s in wanted if s in self.exchange}
             for future in as_completed(jobs):
@@ -70,11 +75,32 @@ class Runner:
                     tick=next(f['tickSize'] for f in self.exchange[sym]['filters'] if f['filterType']=='PRICE_FILTER')
                     snap['tick_size']=tick
                     self.snapshots[sym]=snap
+                    if snap.get("oi5_pending_reason"):
+                        data_pending_counts["oi5"]=data_pending_counts.get("oi5",0)+1
+                        log.info("shadow_data_pending symbol=%s dataset=oi5 reason=%s",
+                                 sym,snap["oi5_pending_reason"])
                     if sym in symbols:
-                        candidates[sym]=evaluate(sym,snap,tick,cfg)
+                        evaluated=evaluate(sym,snap,tick,cfg)
+                        candidates[sym]=evaluated
+                        if not evaluated:
+                            reasons=prefilter_rejections(snap,cfg) or ["candidate_not_returned"]
+                            for reason in reasons:
+                                prefilter_counts[reason]=prefilter_counts.get(reason,0)+1
+                            log.info("candidate_prefilter_blocked symbol=%s reasons=%s",
+                                     sym,json.dumps(reasons,separators=(",",":")))
+                        for candidate_signal in evaluated:
+                            evaluated_sides+=1
+                            failed=[name for name,passed in candidate_signal.checks.items() if not passed]
+                            for name,passed in candidate_signal.checks.items():
+                                target=gate_pass if passed else gate_fail
+                                target[name]=target.get(name,0)+1
+                            log.info("candidate_diagnosis symbol=%s side=%s score=%d eligible=%s failed_gates=%s",
+                                     sym,candidate_signal.side,candidate_signal.score,
+                                     candidate_signal.eligible,json.dumps(failed,separators=(",",":")))
                 except DataPending as exc:
                     self.snapshots.pop(sym,None)
                     pending.append(sym)
+                    data_pending_counts[exc.dataset]=data_pending_counts.get(exc.dataset,0)+1
                     log.info('data_pending symbol=%s reason=%s',sym,str(exc))
                 except Exception as exc:
                     self.snapshots.pop(sym,None)
@@ -107,12 +133,15 @@ class Runner:
                 s.strategy_version='v2.1'
                 s.research=regime(snap)
                 s.research.update({k:snap.get(k) for k in ('flow_source','oi_age_ms','oi5_age_ms')})
-                if cfg.shadow_enabled or cfg.primary_strategy=='v3':
+                if (cfg.shadow_enabled or cfg.primary_strategy=='v3') and "oi5" in snap:
                     v3=candidate_v3(sym,s.side,snap,snap['tick_size'],cfg,btc)
                     if v3:
                         research.append(v3)
                         if v3.eligible:
                             (primary if cfg.primary_strategy=='v3' else shadow).append(v3)
+                elif cfg.shadow_enabled or cfg.primary_strategy=='v3':
+                    log.info("shadow_candidate_skipped symbol=%s side=%s dataset=oi5",
+                             sym,s.side)
                 if s.eligible:
                     if cfg.primary_strategy=='v2.1':
                         primary.append(s)
@@ -130,6 +159,12 @@ class Runner:
             self.deliver(control,'v2-control-15m',now_ms)
         log.info('scan_finished mode=%s full=%s scanned=%d watching=%d eligible=%d delivered=%d shadow=%d failed=%d pending=%d',
                  cfg.primary_strategy,full,len(candidates),len(self.watch),len(primary),sent,shadow_count,len(errors),len(pending))
+        log.info("signal_diagnostics symbols=%d side_evaluations=%d prefilter_rejections=%s gates_passed=%s gates_failed=%s data_pending=%s",
+                 len(candidates),evaluated_sides,
+                 json.dumps(prefilter_counts,sort_keys=True,separators=(",",":")),
+                 json.dumps(gate_pass,sort_keys=True,separators=(",",":")),
+                 json.dumps(gate_fail,sort_keys=True,separators=(",",":")),
+                 json.dumps(data_pending_counts,sort_keys=True,separators=(",",":")))
         # Outcome catch-up follows time-sensitive notifications, never delays
         # entry preparation. A tracking error fails closed on open exposure.
         if not cfg.dry_run:
