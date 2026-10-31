@@ -86,7 +86,13 @@ class BinanceClient:
             req["ticker"] = pool.submit(self.cached,(symbol,"ticker"),now_ms//300000,
                 "/fapi/v1/ticker/24hr",symbol=symbol)
             req["book"] = pool.submit(self.get,"/fapi/v1/ticker/bookTicker",symbol=symbol)
-            out = {key:fut.result() for key,fut in req.items()}
+            # 5m OI is only required by the V3 research cohort. Fetch it in parallel,
+        # but do not let its publication lag discard the v2.1 primary snapshot.
+        out = {key:fut.result() for key,fut in req.items() if key != "oi5"}
+        try:
+            out["oi5"] = req["oi5"].result()
+        except Exception as exc:
+            out["oi5_pending_reason"] = f"fetch_failed:{type(exc).__name__}"
         try:
             for tf,duration in durations.items():
                 out[tf] = [r for r in out[tf] if int(r[6])+250 <= now_ms]
@@ -115,7 +121,7 @@ class BinanceClient:
             out['flow_source']='closed_5m_kline_taker_volume'
             # Derived taker timestamps identify interval starts; OI timestamps
             # are point observations. Never admit future/unclosed intervals.
-            for key,duration,lag in (("taker",300000,300000),("oi",900000,0),("oi5",300000,0)):
+            def validate_series(key,duration,lag):
                 rows=sorted((r for r in out[key] if int(r["timestamp"])+lag<=now_ms),
                             key=lambda r:int(r["timestamp"]))
                 age=now_ms-(int(rows[-1]["timestamp"])+lag) if rows else None
@@ -123,14 +129,29 @@ class BinanceClient:
                     raise DataPending(symbol,key,age,len(rows))
                 if any(int(b["timestamp"])-int(a["timestamp"])!=duration for a,b in zip(rows,rows[1:])):
                     raise BinanceError(f"{symbol} noncontiguous {key}")
-                out[key]=rows
                 fields=("buyVol","sellVol") if key=="taker" else ("sumOpenInterest",)
                 if any(not isfinite(float(r[f])) or float(r[f]) < (0 if key=="taker" else 1e-30)
                        for r in rows for f in fields):
                     raise BinanceError(f"{symbol} invalid {key}")
+                return rows,age
+
+            for key,duration,lag in (("taker",300000,300000),("oi",900000,0)):
+                out[key],_ = validate_series(key,duration,lag)
+
+            if "oi5" in out:
+                try:
+                    out["oi5"],out["oi5_age_ms"] = validate_series("oi5",300000,0)
+                    out["oi5_available"] = True
+                except DataPending as exc:
+                    out.pop("oi5",None)
+                    out["oi5_available"] = False
+                    out["oi5_pending_reason"] = str(exc)
+                    with self._cache_lock:
+                        self._cache.pop((symbol,"oi5"),None)
+            else:
+                out["oi5_available"] = False
             out["asof_ms"]=now_ms
             out['oi_age_ms']=now_ms-int(out['oi'][-1]['timestamp'])
-            out['oi5_age_ms']=now_ms-int(out['oi5'][-1]['timestamp'])
             return out
         except DataPending as exc:
             # Publication can lag a boundary. Keep valid candles cached, but
