@@ -55,6 +55,7 @@ class Journal:
         self.memory_setups=set()
         self.memory_trades=[]
         self.memory_confluences=set()
+        self.memory_price_zones=set()
         if conn is not None:
             conn.execute("""CREATE TABLE IF NOT EXISTS scalp_setup_claims (
                 cohort TEXT NOT NULL, setup_id TEXT NOT NULL, symbol TEXT NOT NULL,
@@ -85,6 +86,11 @@ class Journal:
                 timeframe TEXT NOT NULL, pivot_ts BIGINT NOT NULL,
                 detected_ms BIGINT NOT NULL, delivery TEXT NOT NULL DEFAULT 'reserved')""")
             conn.execute("CREATE INDEX IF NOT EXISTS scalp_confluence_time ON scalp_confluence_alerts(detected_ms)")
+            conn.execute("""CREATE TABLE IF NOT EXISTS scalp_price_zone_alerts (
+                alert_id TEXT PRIMARY KEY, symbol TEXT NOT NULL, zone_low DOUBLE PRECISION NOT NULL,
+                zone_high DOUBLE PRECISION NOT NULL, detected_ms BIGINT NOT NULL,
+                delivery TEXT NOT NULL DEFAULT 'reserved')""")
+            conn.execute("CREATE INDEX IF NOT EXISTS scalp_price_zone_time ON scalp_price_zone_alerts(detected_ms)")
             conn.commit()
 
     def decision(self,signal,cohort,now_ms,reason):
@@ -112,6 +118,26 @@ class Journal:
     def confluence_delivery(self,alert,status):
         if self.conn is not None:
             self.conn.execute("UPDATE scalp_confluence_alerts SET delivery=%s WHERE alert_id=%s",
+                              (status,alert["alert_id"]))
+            self.conn.commit()
+
+    def claim_price_zone(self,alert,now_ms):
+        key=alert["alert_id"]
+        if self.conn is None:
+            if key in self.memory_price_zones:
+                return False
+            self.memory_price_zones.add(key)
+            return True
+        row=self.conn.execute("""INSERT INTO scalp_price_zone_alerts
+            (alert_id,symbol,zone_low,zone_high,detected_ms)
+            VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING alert_id""",
+            (key,alert["symbol"],alert["low"],alert["high"],now_ms)).fetchone()
+        self.conn.commit()
+        return row is not None
+
+    def price_zone_delivery(self,alert,status):
+        if self.conn is not None:
+            self.conn.execute("UPDATE scalp_price_zone_alerts SET delivery=%s WHERE alert_id=%s",
                               (status,alert["alert_id"]))
             self.conn.commit()
 
@@ -208,7 +234,8 @@ class Journal:
     def archive(self,symbol,snapshot,now_ms,assessments):
         if self.conn is None:
             return
-        payload=gzip.compress(json.dumps(snapshot,separators=(",",":")).encode(),compresslevel=6)
+        replay_snapshot={k:v for k,v in snapshot.items() if k not in ("1d","1w","1M")}
+        payload=gzip.compress(json.dumps(replay_snapshot,separators=(",",":")).encode(),compresslevel=6)
         self.conn.execute("INSERT INTO scalp_replay_frames VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
                           (symbol,now_ms,payload))
         for s in assessments:
@@ -259,4 +286,5 @@ class Journal:
             self.conn.execute(f"DELETE FROM {table} WHERE ctid IN (SELECT ctid FROM {table} WHERE observed_ms<%s LIMIT 10000)",(cutoff,))
         self.conn.execute("DELETE FROM scalp_setup_claims WHERE claimed_ms<%s AND (delivery='sent' OR cohort<>'primary')",(cutoff,))
         self.conn.execute("DELETE FROM scalp_confluence_alerts WHERE ctid IN (SELECT ctid FROM scalp_confluence_alerts WHERE detected_ms<%s LIMIT 10000)",(cutoff,))
+        self.conn.execute("DELETE FROM scalp_price_zone_alerts WHERE ctid IN (SELECT ctid FROM scalp_price_zone_alerts WHERE detected_ms<%s LIMIT 10000)",(cutoff,))
         self.conn.commit()

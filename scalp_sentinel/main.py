@@ -15,6 +15,7 @@ from .journal import Journal
 from .notifier import format_signal, send_telegram
 from .research import candidate_v3, correlated, regime
 from .confluence import detect_confluences, format_confluence_alert
+from .price_zones import detect_price_zones, nearby_zone_alert, should_watch_zones, format_price_zone_alert
 from .storage import Cooldowns
 from .tracker import track_signals
 
@@ -31,6 +32,8 @@ class Runner:
         self.snapshots={}
         self.watch=set()
         self.pending=set()
+        self.level_watch=set()
+        self.level_zones={}
         self.full_bucket=None
         self.exchange={}
         self.clock_offset=0
@@ -54,13 +57,15 @@ class Runner:
         symbols=[s for s in cfg.symbols if s in self.exchange]
         if not symbols:
             raise RuntimeError('No supported configured symbols')
-        wanted=set(symbols) if full else (self.watch | self.pending) & set(symbols)
+        wanted=set(symbols) if full else (self.watch | self.pending | self.level_watch) & set(symbols)
         wanted.add('BTCUSDT')
         # Open shadow exposures must have current correlation context too.
         for peer in self.journal.active('v3-shadow')+self.journal.active('primary'):
             wanted.add(peer['symbol'])
         candidates={}
         confluence_alerts=[]
+        level_alerts=[]
+        next_level_watch=set()
         errors=[]
         pending=[]
         data_pending_counts={}
@@ -82,6 +87,18 @@ class Runner:
                             confluence_alerts.extend(detect_confluences(sym,snap,tick))
                         except Exception as exc:
                             log.warning("confluence_eval_failed symbol=%s kind=%s",sym,type(exc).__name__)
+                        try:
+                            self.level_zones[sym]=detect_price_zones(sym,snap,tick)
+                        except Exception as exc:
+                            self.level_zones[sym]=[]
+                            log.warning("price_zone_eval_failed symbol=%s kind=%s",sym,type(exc).__name__)
+                    zones=self.level_zones.get(sym,[])
+                    if zones:
+                        alert=nearby_zone_alert(sym,snap,zones,tick)
+                        if alert:
+                            level_alerts.append(alert)
+                        if should_watch_zones(snap,zones):
+                            next_level_watch.add(sym)
                     if snap.get("oi5_pending_reason"):
                         data_pending_counts["oi5"]=data_pending_counts.get("oi5",0)+1
                         log.info("shadow_data_pending symbol=%s dataset=oi5 reason=%s",
@@ -115,11 +132,14 @@ class Runner:
                     log.warning('snapshot_failed symbol=%s kind=%s reason=%s',sym,type(exc).__name__,
                                 str(exc)[:160] if isinstance(exc,BinanceError) else 'unavailable')
         if full:
+            self.level_watch=next_level_watch
             self.watch={sym for sym,signals in candidates.items()
                         if any(s.checks['15m trend'] and s.checks['5m structure'] for s in signals)}
             self.full_bucket=now_ms//300000
             self.pending=set(pending+errors)
         else:
+            self.level_watch.difference_update(wanted)
+            self.level_watch.update(next_level_watch)
             self.pending.difference_update(wanted)
             self.pending.update(pending+errors)
             for sym,signals in candidates.items():
@@ -165,8 +185,9 @@ class Runner:
         if cfg.shadow_enabled:
             self.deliver(control,'v2-control-15m',now_ms)
         confluence_sent=self.deliver_confluences(confluence_alerts,now_ms)
-        log.info('scan_finished mode=%s full=%s scanned=%d watching=%d eligible=%d delivered=%d confluence=%d shadow=%d failed=%d pending=%d',
-                 cfg.primary_strategy,full,len(candidates),len(self.watch),len(primary),sent,confluence_sent,shadow_count,len(errors),len(pending))
+        level_sent=self.deliver_price_zones(level_alerts,now_ms)
+        log.info('scan_finished mode=%s full=%s scanned=%d watching=%d eligible=%d delivered=%d confluence=%d level_zones=%d shadow=%d failed=%d pending=%d',
+                 cfg.primary_strategy,full,len(candidates),len(self.watch),len(primary),sent,confluence_sent,level_sent,shadow_count,len(errors),len(pending))
         log.info("signal_diagnostics symbols=%d side_evaluations=%d prefilter_rejections=%s gates_passed=%s gates_failed=%s data_pending=%s",
                  len(candidates),evaluated_sides,
                  json.dumps(prefilter_counts,sort_keys=True,separators=(",",":")),
@@ -210,6 +231,30 @@ class Runner:
                 log.info("confluence_telegram_sent symbol=%s side=%s timeframe=%s indicators=%s",
                          alert["symbol"],alert["side"],alert["timeframe"],
                          ",".join(alert["indicators"]))
+                sent+=1
+        return sent
+
+    def deliver_price_zones(self,alerts,now_ms):
+        """Send separate neutral proximity alerts for structural price zones."""
+        sent=0
+        for alert in alerts:
+            if self.cfg.dry_run:
+                log.info("DRY_RUN price_zone symbol=%s center=%s sources=%s zone_id=%s",
+                         alert["symbol"],alert["center"],",".join(alert["sources"]),alert["alert_id"])
+                continue
+            if not self.journal.claim_price_zone(alert,now_ms):
+                continue
+            try:
+                send_telegram(self.cfg.telegram_token,self.cfg.telegram_chat_id,
+                              format_price_zone_alert(alert,self.cfg.timezone))
+            except Exception as exc:
+                self.journal.price_zone_delivery(alert,"uncertain")
+                log.warning("price_zone_delivery_uncertain symbol=%s kind=%s",
+                            alert["symbol"],type(exc).__name__)
+            else:
+                self.journal.price_zone_delivery(alert,"sent")
+                log.info("price_zone_telegram_sent symbol=%s center=%s sources=%s",
+                         alert["symbol"],alert["center"],",".join(alert["sources"]))
                 sent+=1
         return sent
 

@@ -71,14 +71,22 @@ class BinanceClient:
         return value
 
     def snapshot(self, symbol, now_ms):
-        durations = {"1m":60000,"5m":300000,"15m":900000,"1h":3600000,"4h":14400000}
+        durations = {"1m":60000,"5m":300000,"15m":900000,"1h":3600000,"4h":14400000,"1d":86400000,"1w":604800000}
+        from datetime import datetime, timezone
+        current = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
+        month_bucket = current.year * 12 + current.month
+        buckets = {tf: now_ms // duration for tf, duration in durations.items()}
+        buckets["1w"] = (now_ms + 3 * 86400000) // 604800000
         # Cache by closed-period boundary; never reuse a failed request.
-        with ThreadPoolExecutor(max_workers=5) as pool:
+        with ThreadPoolExecutor(max_workers=8) as pool:
             req = {
-                tf: pool.submit(self.cached, (symbol,tf), now_ms//duration,
-                    "/fapi/v1/klines",symbol=symbol,interval=tf,limit=140)
+                tf: pool.submit(self.cached, (symbol,tf), buckets[tf],
+                    "/fapi/v1/klines",symbol=symbol,interval=tf,
+                    limit=220 if tf in ("1d","1w") else 140)
                 for tf,duration in durations.items()
             }
+            req["1M"] = pool.submit(self.cached, (symbol,"1M"), month_bucket,
+                "/fapi/v1/klines",symbol=symbol,interval="1M",limit=26)
             for key, period, duration in (("oi","15m",900000),("oi5","5m",300000)):
                 path = "/futures/data/openInterestHist"
                 req[key] = pool.submit(self.cached,(symbol,key),now_ms//duration,path,
@@ -97,7 +105,8 @@ class BinanceClient:
             for tf,duration in durations.items():
                 out[tf] = [r for r in out[tf] if int(r[6])+250 <= now_ms]
                 rows=out[tf]
-                if len(rows)<65 or now_ms-int(rows[-1][6])>duration+15000:
+                minimum = 65
+                if len(rows)<minimum or now_ms-int(rows[-1][6])>duration+15000:
                     raise BinanceError(f"{symbol} stale/insufficient {tf}")
                 for row in rows:
                     o,h,l,c,v=map(float,row[1:6])
@@ -106,6 +115,20 @@ class BinanceClient:
                         raise BinanceError(f"{symbol} invalid {tf} candle")
                 if any(int(b[0])-int(a[0])!=duration for a,b in zip(rows,rows[1:])):
                     raise BinanceError(f"{symbol} noncontiguous {tf}")
+            monthly=[r for r in out["1M"] if int(r[6])+250<=now_ms]
+            if len(monthly)<3 or now_ms-int(monthly[-1][6])>32*86400000:
+                raise BinanceError(f"{symbol} stale/insufficient 1M")
+            for row in monthly:
+                o,h,l,c,v=map(float,row[1:6])
+                if (not all(isfinite(x) for x in (o,h,l,c,v)) or l<=0
+                        or not l<=min(o,c)<=max(o,c)<=h or v<0):
+                    raise BinanceError(f"{symbol} invalid 1M candle")
+            for a,b in zip(monthly,monthly[1:]):
+                am=datetime.fromtimestamp(int(a[0])/1000,tz=timezone.utc)
+                bm=datetime.fromtimestamp(int(b[0])/1000,tz=timezone.utc)
+                if (bm.year*12+bm.month)!=(am.year*12+am.month+1):
+                    raise BinanceError(f"{symbol} noncontiguous 1M")
+            out["1M"]=monthly
             # Binance USD-M klines contain total base volume at [5] and
             # taker-buy base volume at [9]. Derive sell volume from the same
             # CLOSED candle, avoiding the delayed statistical endpoint and
