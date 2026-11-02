@@ -107,6 +107,9 @@ class BinanceClient:
                 if key not in optional_levels:
                     raise
                 out[key] = []
+                if isinstance(exc, KeyError):
+                    with self._cache_lock:
+                        self._cache[(symbol,key)] = (buckets.get(key,month_bucket), [])
                 out.setdefault("level_data_pending", []).append(
                     f"{key}:{type(exc).__name__}")
         try:
