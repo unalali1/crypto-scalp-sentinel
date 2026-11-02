@@ -144,6 +144,24 @@ def candidate(symbol, direction, snapshot, tick_size, cfg):
                   last1.ts, entry_trigger, eligible)
 
 
+def confirm_15m_close(direction, snapshot, now_ms):
+    """Require a completed 15m candle to carry directional momentum."""
+    bars = [bar for bar in candles(snapshot.get("15m") or [])
+            if bar.ts + 900_000 <= now_ms]
+    if len(bars) < 2:
+        return False, None
+    previous, last = bars[-2], bars[-1]
+    span = last.h - last.l
+    if span <= 0:
+        return False, last.ts + 900_000
+    close_location = (last.c - last.l) / span
+    if direction == "LONG":
+        confirmed = last.c > last.o and last.c > previous.c and close_location >= 0.70
+    else:
+        confirmed = last.c < last.o and last.c < previous.c and close_location <= 0.30
+    return bool(confirmed), last.ts + 900_000
+
+
 def evaluate(symbol, snapshot, tick_size, cfg):
     output = []
     for direction in ("LONG", "SHORT"):

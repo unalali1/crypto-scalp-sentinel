@@ -9,7 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .binance_client import BinanceClient, BinanceError, DataPending
 from .config import Config
-from .engine import evaluate, prefilter_rejections
+from .engine import evaluate, prefilter_rejections, confirm_15m_close
 from .execution import prepare
 from .journal import Journal
 from .notifier import format_signal, send_telegram
@@ -158,6 +158,9 @@ class Runner:
                     self.watch.discard(sym)
         primary=[]
         shadow=[]
+        shadow_15m=[]
+        shadow_15m_base=0
+        shadow_15m_confirmed=0
         control=[]
         btc=self.snapshots.get('BTCUSDT')
         if btc and btc['asof_ms']!=now_ms:
@@ -181,6 +184,19 @@ class Runner:
                 if s.eligible:
                     if cfg.primary_strategy=='v2.1':
                         primary.append(s)
+                    if cfg.shadow_enabled and cfg.primary_strategy=='v2.1':
+                        shadow_15m_base+=1
+                        confirmed,confirm_close_ms=confirm_15m_close(s.side,snap,now_ms)
+                        if confirmed:
+                            variant=copy.deepcopy(s)
+                            variant.strategy_version='v2.1-15m-confirm'
+                            variant.checks=dict(s.checks,**{'15m close confirmation':True})
+                            variant.score=s.score+1
+                            variant.setup_id=f"{s.setup_id}:15m-close:{confirm_close_ms}"
+                            variant.research=copy.deepcopy(s.research)
+                            shadow_15m.append(variant)
+                            research.append(variant)
+                            shadow_15m_confirmed+=1
                     if cfg.shadow_enabled and now_ms//60000 % 15==0:
                         control.append(copy.deepcopy(s))
             self.journal.archive(sym,snap,now_ms,signals+research)
@@ -194,12 +210,14 @@ class Runner:
             raise RuntimeError('all_snapshots_failed')
         sent=self.deliver(primary,'primary',now_ms)
         shadow_count=self.deliver(shadow,'v3-shadow',now_ms) if cfg.shadow_enabled else 0
+        shadow_15m_count=self.deliver(shadow_15m,'v2.1-15m-confirm',now_ms) if cfg.shadow_enabled and cfg.primary_strategy=='v2.1' else 0
         if cfg.shadow_enabled:
             self.deliver(control,'v2-control-15m',now_ms)
         confluence_sent=self.deliver_confluences(confluence_alerts,now_ms)
         level_sent=self.deliver_price_zones(level_alerts,now_ms)
-        log.info('scan_finished mode=%s full=%s scanned=%d watching=%d eligible=%d delivered=%d confluence=%d level_zones=%d shadow=%d failed=%d pending=%d',
-                 cfg.primary_strategy,full,len(candidates),len(self.watch),len(primary),sent,confluence_sent,level_sent,shadow_count,len(errors),len(pending))
+        log.info('scan_finished mode=%s full=%s scanned=%d watching=%d eligible=%d delivered=%d confluence=%d level_zones=%d shadow_v3=%d shadow_15m_confirm=%d confirm_candidates=%d/%d failed=%d pending=%d',
+                 cfg.primary_strategy,full,len(candidates),len(self.watch),len(primary),sent,confluence_sent,level_sent,
+                 shadow_count,shadow_15m_count,shadow_15m_confirmed,shadow_15m_base,len(errors),len(pending))
         log.info("signal_diagnostics symbols=%d side_evaluations=%d prefilter_rejections=%s gates_passed=%s gates_failed=%s data_pending=%s",
                  len(candidates),evaluated_sides,
                  json.dumps(prefilter_counts,sort_keys=True,separators=(",",":")),
