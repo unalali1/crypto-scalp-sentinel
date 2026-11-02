@@ -14,6 +14,7 @@ from .execution import prepare
 from .journal import Journal
 from .notifier import format_signal, send_telegram
 from .research import candidate_v3, correlated, regime
+from .confluence import detect_confluences, format_confluence_alert
 from .storage import Cooldowns
 from .tracker import track_signals
 
@@ -59,6 +60,7 @@ class Runner:
         for peer in self.journal.active('v3-shadow')+self.journal.active('primary'):
             wanted.add(peer['symbol'])
         candidates={}
+        confluence_alerts=[]
         errors=[]
         pending=[]
         data_pending_counts={}
@@ -75,6 +77,11 @@ class Runner:
                     tick=next(f['tickSize'] for f in self.exchange[sym]['filters'] if f['filterType']=='PRICE_FILTER')
                     snap['tick_size']=tick
                     self.snapshots[sym]=snap
+                    if full and sym in symbols:
+                        try:
+                            confluence_alerts.extend(detect_confluences(sym,snap,tick))
+                        except Exception as exc:
+                            log.warning("confluence_eval_failed symbol=%s kind=%s",sym,type(exc).__name__)
                     if snap.get("oi5_pending_reason"):
                         data_pending_counts["oi5"]=data_pending_counts.get("oi5",0)+1
                         log.info("shadow_data_pending symbol=%s dataset=oi5 reason=%s",
@@ -157,8 +164,9 @@ class Runner:
         shadow_count=self.deliver(shadow,'v3-shadow',now_ms) if cfg.shadow_enabled else 0
         if cfg.shadow_enabled:
             self.deliver(control,'v2-control-15m',now_ms)
-        log.info('scan_finished mode=%s full=%s scanned=%d watching=%d eligible=%d delivered=%d shadow=%d failed=%d pending=%d',
-                 cfg.primary_strategy,full,len(candidates),len(self.watch),len(primary),sent,shadow_count,len(errors),len(pending))
+        confluence_sent=self.deliver_confluences(confluence_alerts,now_ms)
+        log.info('scan_finished mode=%s full=%s scanned=%d watching=%d eligible=%d delivered=%d confluence=%d shadow=%d failed=%d pending=%d',
+                 cfg.primary_strategy,full,len(candidates),len(self.watch),len(primary),sent,confluence_sent,shadow_count,len(errors),len(pending))
         log.info("signal_diagnostics symbols=%d side_evaluations=%d prefilter_rejections=%s gates_passed=%s gates_failed=%s data_pending=%s",
                  len(candidates),evaluated_sides,
                  json.dumps(prefilter_counts,sort_keys=True,separators=(",",":")),
@@ -177,6 +185,32 @@ class Runner:
             if self.journal.conn is not None:
                 from .report import read_report
                 log.info('performance_report %s',json.dumps(read_report(self.journal.conn),ensure_ascii=False))
+        return sent
+
+    def deliver_confluences(self,alerts,now_ms):
+        """Send separate directional context alerts; never create paper trades."""
+        sent=0
+        for alert in alerts:
+            if self.cfg.dry_run:
+                log.info("DRY_RUN confluence symbol=%s side=%s timeframe=%s indicators=%s zone_id=%s",
+                         alert["symbol"],alert["side"],alert["timeframe"],
+                         ",".join(alert["indicators"]),alert["alert_id"])
+                continue
+            if not self.journal.claim_confluence(alert,now_ms):
+                continue
+            try:
+                send_telegram(self.cfg.telegram_token,self.cfg.telegram_chat_id,
+                              format_confluence_alert(alert,self.cfg.timezone))
+            except Exception as exc:
+                self.journal.confluence_delivery(alert,"uncertain")
+                log.warning("confluence_delivery_uncertain symbol=%s side=%s timeframe=%s kind=%s",
+                            alert["symbol"],alert["side"],alert["timeframe"],type(exc).__name__)
+            else:
+                self.journal.confluence_delivery(alert,"sent")
+                log.info("confluence_telegram_sent symbol=%s side=%s timeframe=%s indicators=%s",
+                         alert["symbol"],alert["side"],alert["timeframe"],
+                         ",".join(alert["indicators"]))
+                sent+=1
         return sent
 
     def deliver(self,signals,cohort,now_ms):

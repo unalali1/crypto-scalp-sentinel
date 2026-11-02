@@ -54,6 +54,7 @@ class Journal:
         self.conn=conn
         self.memory_setups=set()
         self.memory_trades=[]
+        self.memory_confluences=set()
         if conn is not None:
             conn.execute("""CREATE TABLE IF NOT EXISTS scalp_setup_claims (
                 cohort TEXT NOT NULL, setup_id TEXT NOT NULL, symbol TEXT NOT NULL,
@@ -79,6 +80,11 @@ class Journal:
                 side TEXT NOT NULL, reason TEXT NOT NULL,
                 PRIMARY KEY(symbol,observed_ms,cohort,side))""")
             conn.execute("CREATE INDEX IF NOT EXISTS scalp_decision_time ON scalp_decisions(observed_ms)")
+            conn.execute("""CREATE TABLE IF NOT EXISTS scalp_confluence_alerts (
+                alert_id TEXT PRIMARY KEY, symbol TEXT NOT NULL, side TEXT NOT NULL,
+                timeframe TEXT NOT NULL, pivot_ts BIGINT NOT NULL,
+                detected_ms BIGINT NOT NULL, delivery TEXT NOT NULL DEFAULT 'reserved')""")
+            conn.execute("CREATE INDEX IF NOT EXISTS scalp_confluence_time ON scalp_confluence_alerts(detected_ms)")
             conn.commit()
 
     def decision(self,signal,cohort,now_ms,reason):
@@ -87,6 +93,26 @@ class Journal:
             self.conn.execute("""INSERT INTO scalp_decisions VALUES (%s,%s,%s,%s,%s)
                 ON CONFLICT(symbol,observed_ms,cohort,side) DO UPDATE SET reason=excluded.reason""",
                 (signal.symbol,now_ms,cohort,signal.side,reason))
+            self.conn.commit()
+
+    def claim_confluence(self,alert,now_ms):
+        key=alert["alert_id"]
+        if self.conn is None:
+            if key in self.memory_confluences:
+                return False
+            self.memory_confluences.add(key)
+            return True
+        row=self.conn.execute("""INSERT INTO scalp_confluence_alerts
+            (alert_id,symbol,side,timeframe,pivot_ts,detected_ms)
+            VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING alert_id""",
+            (key,alert["symbol"],alert["side"],alert["timeframe"],alert["pivot_ts"],now_ms)).fetchone()
+        self.conn.commit()
+        return row is not None
+
+    def confluence_delivery(self,alert,status):
+        if self.conn is not None:
+            self.conn.execute("UPDATE scalp_confluence_alerts SET delivery=%s WHERE alert_id=%s",
+                              (status,alert["alert_id"]))
             self.conn.commit()
 
     def lock(self):
@@ -232,4 +258,5 @@ class Journal:
         for table in ("scalp_replay_frames","scalp_assessments","scalp_decisions"):
             self.conn.execute(f"DELETE FROM {table} WHERE ctid IN (SELECT ctid FROM {table} WHERE observed_ms<%s LIMIT 10000)",(cutoff,))
         self.conn.execute("DELETE FROM scalp_setup_claims WHERE claimed_ms<%s AND (delivery='sent' OR cohort<>'primary')",(cutoff,))
+        self.conn.execute("DELETE FROM scalp_confluence_alerts WHERE ctid IN (SELECT ctid FROM scalp_confluence_alerts WHERE detected_ms<%s LIMIT 10000)",(cutoff,))
         self.conn.commit()
