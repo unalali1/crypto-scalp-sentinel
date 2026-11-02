@@ -182,8 +182,11 @@ class Runner:
         # Archive BTC even if it is excluded from the user watchlist.
         if btc and 'BTCUSDT' not in candidates:
             self.journal.archive('BTCUSDT',btc,now_ms,[])
-        if errors and len(errors)>=max(2,len(wanted)//2):
-            raise RuntimeError('too_many_snapshot_failures')
+        attempted=len(jobs)
+        if errors:
+            log.warning("scan_degraded failed=%d attempted=%d",len(errors),attempted)
+        if attempted and len(errors)>=attempted:
+            raise RuntimeError('all_snapshots_failed')
         sent=self.deliver(primary,'primary',now_ms)
         shadow_count=self.deliver(shadow,'v3-shadow',now_ms) if cfg.shadow_enabled else 0
         if cfg.shadow_enabled:
