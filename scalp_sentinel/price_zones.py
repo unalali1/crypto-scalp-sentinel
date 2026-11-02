@@ -205,7 +205,8 @@ def nearby_zone_alert(symbol, snapshot, zones, tick_size):
             groups[-1].append((zone, distance))
         else:
             groups.append([(zone, distance)])
-    members, distance = min(groups, key=lambda group: min(item[1] for item in group))
+    members = min(groups, key=lambda group: min(item[1] for item in group))
+    distance = min(item[1] for item in members)
     low = min(item[0]["low"] for item in members)
     high = max(item[0]["high"] for item in members)
     center = (low + high) / 2
