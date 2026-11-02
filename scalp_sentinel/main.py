@@ -80,11 +80,14 @@ class Runner:
             jobs={pool.submit(self.client.snapshot,s,now_ms):s for s in wanted if s in self.exchange}
             for future in as_completed(jobs):
                 sym=jobs[future]
+                stage="snapshot"
                 try:
                     snap=future.result()
+                    stage="symbol_metadata"
                     tick=next(f['tickSize'] for f in self.exchange[sym]['filters'] if f['filterType']=='PRICE_FILTER')
                     snap['tick_size']=tick
                     self.snapshots[sym]=snap
+                    stage="zone_watch"
                     if full and sym in symbols:
                         try:
                             confluence_alerts.extend(detect_confluences(sym,snap,tick))
@@ -108,6 +111,7 @@ class Runner:
                         log.info("shadow_data_pending symbol=%s dataset=oi5 reason=%s",
                                  sym,snap["oi5_pending_reason"])
                     if sym in symbols:
+                        stage="signal_evaluation"
                         evaluated=evaluate(sym,snap,tick,cfg)
                         candidates[sym]=evaluated
                         if not evaluated:
@@ -133,8 +137,9 @@ class Runner:
                 except Exception as exc:
                     self.snapshots.pop(sym,None)
                     errors.append(sym)
-                    log.warning('snapshot_failed symbol=%s kind=%s reason=%s',sym,type(exc).__name__,
-                                str(exc)[:160] if isinstance(exc,BinanceError) else 'unavailable')
+                    detail=str(exc).replace("\\n"," ")[:160]
+                    log.warning('snapshot_failed symbol=%s stage=%s kind=%s detail=%s',
+                                sym,stage,type(exc).__name__,detail or 'no_detail')
         if full:
             self.level_watch=next_level_watch
             self.watch={sym for sym,signals in candidates.items()
