@@ -96,7 +96,19 @@ class BinanceClient:
             req["book"] = pool.submit(self.get,"/fapi/v1/ticker/bookTicker",symbol=symbol)
             # 5m OI is only required by the V3 research cohort. Fetch it in parallel,
         # but do not let its publication lag discard the v2.1 primary snapshot.
-        out = {key:fut.result() for key,fut in req.items() if key != "oi5"}
+        out = {}
+        optional_levels = {"1d","1w","1M"}
+        for key,fut in req.items():
+            if key == "oi5":
+                continue
+            try:
+                out[key] = fut.result()
+            except Exception as exc:
+                if key not in optional_levels:
+                    raise
+                out[key] = []
+                out.setdefault("level_data_pending", []).append(
+                    f"{key}:{type(exc).__name__}")
         try:
             out["oi5"] = req["oi5"].result()
         except Exception as exc:
@@ -105,8 +117,13 @@ class BinanceClient:
             for tf,duration in durations.items():
                 out[tf] = [r for r in out[tf] if int(r[6])+250 <= now_ms]
                 rows=out[tf]
-                minimum = 65
-                if len(rows)<minimum or now_ms-int(rows[-1][6])>duration+15000:
+                if tf in optional_levels and not rows:
+                    continue
+                if (tf not in optional_levels and len(rows)<65) or now_ms-int(rows[-1][6])>duration+15000:
+                    if tf in optional_levels:
+                        out[tf]=[]
+                        out.setdefault("level_data_pending", []).append(f"{tf}:stale_or_insufficient")
+                        continue
                     raise BinanceError(f"{symbol} stale/insufficient {tf}")
                 for row in rows:
                     o,h,l,c,v=map(float,row[1:6])
@@ -115,9 +132,10 @@ class BinanceClient:
                         raise BinanceError(f"{symbol} invalid {tf} candle")
                 if any(int(b[0])-int(a[0])!=duration for a,b in zip(rows,rows[1:])):
                     raise BinanceError(f"{symbol} noncontiguous {tf}")
-            monthly=[r for r in out["1M"] if int(r[6])+250<=now_ms]
-            if len(monthly)<3 or now_ms-int(monthly[-1][6])>32*86400000:
-                raise BinanceError(f"{symbol} stale/insufficient 1M")
+            monthly=[r for r in out.get("1M",[]) if int(r[6])+250<=now_ms]
+            if monthly and now_ms-int(monthly[-1][6])>32*86400000:
+                monthly=[]
+                out.setdefault("level_data_pending", []).append("1M:stale")
             for row in monthly:
                 o,h,l,c,v=map(float,row[1:6])
                 if (not all(isfinite(x) for x in (o,h,l,c,v)) or l<=0
