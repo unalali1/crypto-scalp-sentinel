@@ -74,6 +74,38 @@ def detect_price_zones(symbol, snapshot, tick_size):
         points.append((float(first[1]), f"Q{quarter} open"))
         points.append((float(last[4]), f"Q{quarter} close"))
 
+    # Match Barbarians Trading's rolling 300-bar Fibonacci range, using
+    # confirmed 1h and 4h candles so the levels are stable in the scanner.
+    fib_ratios = (0, 0.114, 0.214, 0.34, 0.382, 0.5, 0.618, 0.66, 0.786, 0.886, 1)
+    for tf in ("1h", "4h"):
+        rows = snapshot.get(tf) or []
+        if len(rows) < 300:
+            continue
+        window = rows[-300:]
+        high = max(float(row[2]) for row in window)
+        low = min(float(row[3]) for row in window)
+        for ratio in fib_ratios:
+            level = low + (high - low) * ratio
+            points.append((level, f"{tf.upper()} Fib {ratio:g}"))
+
+    # Previous-day extension levels from the companion Pine Fib script.
+    # Its source uses the prior completed daily candle's high/low range.
+    if daily:
+        previous = daily[-1]
+        range_high, range_low = float(previous[2]), float(previous[3])
+        day_range = range_high - range_low
+        extension_levels = (
+            (1.618, "Previous-day extension 1.618 FOMO"),
+            (1.214, "Previous-day extension 1.214 Ex2"),
+            (1.114, "Previous-day extension 1.114 Ex1"),
+            (0.5, "Previous-day Fib equilibrium 0.500"),
+            (-0.114, "Previous-day extension -0.114 Ex1"),
+            (-0.214, "Previous-day extension -0.214 Ex2"),
+            (-0.618, "Previous-day extension -0.618 FOMO"),
+        )
+        for ratio, label in extension_levels:
+            points.append((range_low + day_range * ratio, label))
+
     for tf, rows in (("D", daily), ("W", weekly)):
         closes = _close(rows)
         for period in (21, 50, 200):
@@ -88,7 +120,9 @@ def detect_price_zones(symbol, snapshot, tick_size):
         ma_count = sum("SMA" in label for label in labels)
         is_period_cluster = len(group) >= 3 and len(period_kinds) >= 2
         is_ma_cluster = ma_count >= 2
-        if not (is_period_cluster or is_ma_cluster):
+        is_fib_zone = any(" Fib " in label or "extension " in label.lower()
+                          for label in labels)
+        if not (is_period_cluster or is_ma_cluster or is_fib_zone):
             continue
         low = min(value for value, _ in group)
         high = max(value for value, _ in group)

@@ -82,7 +82,7 @@ class BinanceClient:
             req = {
                 tf: pool.submit(self.cached, (symbol,tf), buckets[tf],
                     "/fapi/v1/klines",symbol=symbol,interval=tf,
-                    limit=220 if tf in ("1d","1w") else 140)
+                    limit=300 if tf in ("1h","4h") else 220 if tf in ("1d","1w") else 140)
                 for tf,duration in durations.items()
             }
             req["1M"] = pool.submit(self.cached, (symbol,"1M"), month_bucket,
