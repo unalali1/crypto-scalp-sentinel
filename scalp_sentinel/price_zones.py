@@ -121,6 +121,35 @@ def should_watch_zones(snapshot, zones):
     return price > 0 and any(_distance(price, zone) <= 4 * _buffer(price, zone) for zone in zones)
 
 
+def _approach(snapshot, price, zone):
+    rows = snapshot.get("1m") or []
+    closes = [float(row[4]) for row in rows[-12:]]
+    if not closes:
+        return None
+    recent = closes[-5:] if len(closes) >= 5 else closes
+    movement = price - recent[0]
+
+    if price > zone["high"]:
+        if movement >= 0:
+            return None
+        return "Potential support", "From above · approaching the zone"
+    if price < zone["low"]:
+        if movement <= 0:
+            return None
+        return "Potential resistance", "From below · approaching the zone"
+
+    for previous in reversed(closes):
+        if previous > zone["high"]:
+            return "Potential support", "From above · testing the zone"
+        if previous < zone["low"]:
+            return "Potential resistance", "From below · testing the zone"
+    if movement < 0:
+        return "Potential support", "From above · testing the zone"
+    if movement > 0:
+        return "Potential resistance", "From below · testing the zone"
+    return "Confluence zone", "Inside the zone · approach direction unclear"
+
+
 def nearby_zone_alert(symbol, snapshot, zones, tick_size):
     price = _price(snapshot)
     if price <= 0:
@@ -130,24 +159,48 @@ def nearby_zone_alert(symbol, snapshot, zones, tick_size):
     if not close:
         return None
     zone, distance = min(close, key=lambda item: item[1])
+    approach = _approach(snapshot, price, zone)
+    if approach is None:
+        return None
+    role, direction = approach
     return {
         "alert_id": f"{symbol}:{zone['zone_id']}", "symbol": symbol,
         "low": zone["low"], "high": zone["high"], "center": zone["center"],
         "price": price, "distance": distance, "sources": zone["sources"],
         "zone_id": zone["zone_id"], "tick_size": tick_size,
+        "role": role, "approach": direction,
     }
 
 
 def format_price_zone_alert(alert, tz):
-    source_text = ", ".join(alert["sources"])
+    source_names = {
+        "D open": "Daily open", "D close": "Daily close",
+        "W open": "Weekly open", "W close": "Weekly close",
+        "M open": "Monthly open", "M close": "Monthly close",
+    }
+    def label(name):
+        if name in source_names:
+            return source_names[name]
+        if name.startswith("Q"):
+            return name.replace("Q", "Quarterly ", 1)
+        if name.startswith("D "):
+            return name.replace("D ", "Daily ", 1)
+        if name.startswith("W "):
+            return name.replace("W ", "Weekly ", 1)
+        return name
+    source_text = ", ".join(label(name) for name in alert["sources"])
     low, high = alert["low"], alert["high"]
     band = f"{low:,.8g}" if low == high else f"{low:,.8g} – {high:,.8g}"
-    return "\n".join([
-        f"🧭 FİYAT KONFLUENSİ | {alert['symbol']}",
-        f"Yakınlaşılan bölge: {band}",
-        f"Anlık fiyat: {alert['price']:,.8g} · merkez: {alert['center']:,.8g}",
-        f"Seviye birleşimi: {source_text}",
+    distance = "Inside the zone" if alert["distance"] == 0 else f"{alert['distance']:,.8g}"
+    return "\\n".join([
+        f"🧭 PRICE CONFLUENCE | {alert['symbol']}",
+        f"Zone type: {alert['role']}",
+        f"Approach: {alert['approach']}",
+        f"Zone: {band}",
+        f"Current price: {alert['price']:,.8g} · midpoint: {alert['center']:,.8g}",
+        f"Distance to zone: {distance}",
+        f"Confluence: {source_text}",
         "",
-        "Bu bir işlem sinyali değildir; giriş, stop ve hedef içermez.",
-        "Bölge, tamamlanmış dönem seviyeleri ve/veya günlük-haftalık hareketli ortalamalardan hesaplandı.",
+        "Context only. This is not a trade signal and includes no entry, stop, or targets.",
+        "Based on completed Daily/Weekly/Monthly/Quarterly open-close levels and/or Daily/Weekly SMAs.",
     ])
