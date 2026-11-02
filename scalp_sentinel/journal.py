@@ -56,6 +56,8 @@ class Journal:
         self.memory_trades=[]
         self.memory_confluences=set()
         self.memory_price_zones=set()
+        self.memory_price_zone_state={}
+        self.memory_price_zone_events=[]
         if conn is not None:
             conn.execute("""CREATE TABLE IF NOT EXISTS scalp_setup_claims (
                 cohort TEXT NOT NULL, setup_id TEXT NOT NULL, symbol TEXT NOT NULL,
@@ -91,6 +93,14 @@ class Journal:
                 zone_high DOUBLE PRECISION NOT NULL, detected_ms BIGINT NOT NULL,
                 delivery TEXT NOT NULL DEFAULT 'reserved')""")
             conn.execute("CREATE INDEX IF NOT EXISTS scalp_price_zone_time ON scalp_price_zone_alerts(detected_ms)")
+            conn.execute("ALTER TABLE scalp_price_zone_alerts ADD COLUMN IF NOT EXISTS symbol TEXT")
+            conn.execute("ALTER TABLE scalp_price_zone_alerts ADD COLUMN IF NOT EXISTS alert_type TEXT NOT NULL DEFAULT 'immediate'")
+            conn.execute("CREATE INDEX IF NOT EXISTS scalp_price_zone_symbol_time ON scalp_price_zone_alerts(symbol,detected_ms)")
+            conn.execute("""CREATE TABLE IF NOT EXISTS scalp_price_zone_state (
+                symbol TEXT NOT NULL, zone_key TEXT NOT NULL, zone_low DOUBLE PRECISION NOT NULL,
+                zone_high DOUBLE PRECISION NOT NULL, atr1h DOUBLE PRECISION NOT NULL,
+                armed BOOLEAN NOT NULL DEFAULT TRUE, last_alert_ms BIGINT,
+                updated_ms BIGINT NOT NULL, PRIMARY KEY(symbol,zone_key))""")
             conn.commit()
 
     def decision(self,signal,cohort,now_ms,reason):
@@ -121,24 +131,90 @@ class Journal:
                               (status,alert["alert_id"]))
             self.conn.commit()
 
-    def claim_price_zone(self,alert,now_ms):
-        key=alert["alert_id"]
+    def observe_price_zones(self,symbol,zones,price,now_ms):
+        for zone in zones:
+            key=(symbol,zone["zone_id"])
+            state=self.memory_price_zone_state.get(key,{"armed":True,"last_alert_ms":None})
+            if not state["armed"] and max(0.0,zone["low"]-price,price-zone["high"]) > 0.5*zone["atr1h"]:
+                state["armed"]=True
+            state.update({"low":zone["low"],"high":zone["high"],"atr1h":zone["atr1h"],"updated_ms":now_ms})
+            self.memory_price_zone_state[key]=state
         if self.conn is None:
-            if key in self.memory_price_zones:
-                return False
-            self.memory_price_zones.add(key)
-            return True
-        row=self.conn.execute("""INSERT INTO scalp_price_zone_alerts
-            (alert_id,symbol,zone_low,zone_high,detected_ms)
-            VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING alert_id""",
-            (key,alert["symbol"],alert["low"],alert["high"],now_ms)).fetchone()
+            return
+        for zone in zones:
+            key=zone["zone_id"]
+            self.conn.execute("""INSERT INTO scalp_price_zone_state
+                (symbol,zone_key,zone_low,zone_high,atr1h,updated_ms)
+                VALUES (%s,%s,%s,%s,%s,%s)
+                ON CONFLICT(symbol,zone_key) DO UPDATE SET
+                zone_low=excluded.zone_low,zone_high=excluded.zone_high,
+                atr1h=excluded.atr1h,updated_ms=excluded.updated_ms""",
+                (symbol,key,zone["low"],zone["high"],zone["atr1h"],now_ms))
+            row=self.conn.execute("""SELECT armed,atr1h,zone_low,zone_high
+                FROM scalp_price_zone_state WHERE symbol=%s AND zone_key=%s""",
+                (symbol,key)).fetchone()
+            if row and not row[0] and max(0.0,zone["low"]-price,price-zone["high"]) > 0.5*max(float(row[1]),zone["atr1h"]):
+                self.conn.execute("""UPDATE scalp_price_zone_state SET armed=TRUE
+                    WHERE symbol=%s AND zone_key=%s""",(symbol,key))
         self.conn.commit()
-        return row is not None
+
+    def claim_price_zone(self,alert,now_ms):
+        symbol=alert["symbol"]
+        zone_key=alert.get("zone_key",alert.get("zone_id",alert["alert_id"]))
+        if self.conn is None:
+            recent=[ts for sym,ts,_kind in self.memory_price_zone_events if sym==symbol and now_ms-ts<30*60*1000]
+            if recent:
+                return False
+            state=self.memory_price_zone_state.setdefault((symbol,zone_key),{"armed":True})
+            if not state["armed"]:
+                return False
+            state["armed"]=False
+            state["last_alert_ms"]=now_ms
+            event_id=f"{symbol}:{zone_key}:{now_ms}"
+            alert["event_id"]=event_id
+            self.memory_price_zones.add(event_id)
+            self.memory_price_zone_events.append((symbol,now_ms,alert.get("alert_type","immediate")))
+            return True
+        last=self.conn.execute("""SELECT MAX(detected_ms) FROM scalp_price_zone_alerts
+            WHERE symbol=%s AND detected_ms>%s""",(symbol,now_ms-30*60*1000)).fetchone()[0]
+        if last is not None:
+            return False
+        state=self.conn.execute("""SELECT armed FROM scalp_price_zone_state
+            WHERE symbol=%s AND zone_key=%s""",(symbol,zone_key)).fetchone()
+        if state is not None and not state[0]:
+            return False
+        event_id=f"{symbol}:{zone_key}:{now_ms}"
+        alert_type=alert.get("alert_type","immediate")
+        row=self.conn.execute("""INSERT INTO scalp_price_zone_alerts
+            (alert_id,symbol,zone_low,zone_high,detected_ms,alert_type)
+            VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING alert_id""",
+            (event_id,symbol,alert["low"],alert["high"],now_ms,alert_type)).fetchone()
+        if row is None:
+            self.conn.commit()
+            return False
+        self.conn.execute("""INSERT INTO scalp_price_zone_state
+            (symbol,zone_key,zone_low,zone_high,atr1h,armed,last_alert_ms,updated_ms)
+            VALUES (%s,%s,%s,%s,%s,FALSE,%s,%s)
+            ON CONFLICT(symbol,zone_key) DO UPDATE SET armed=FALSE,
+            last_alert_ms=excluded.last_alert_ms,updated_ms=excluded.updated_ms""",
+            (symbol,zone_key,alert["low"],alert["high"],alert.get("atr1h",0),now_ms,now_ms))
+        alert["event_id"]=event_id
+        self.conn.commit()
+        return True
+
+    def recent_price_zone_count(self,now_ms):
+        cutoff=now_ms-15*60*1000
+        if self.conn is None:
+            self.memory_price_zone_events=[item for item in self.memory_price_zone_events if item[1]>=cutoff]
+            return sum(1 for _,ts,kind in self.memory_price_zone_events if ts>=cutoff and kind=="immediate")
+        row=self.conn.execute("""SELECT COUNT(*) FROM scalp_price_zone_alerts
+            WHERE detected_ms>=%s AND alert_type='immediate'""",(cutoff,)).fetchone()
+        return int(row[0] or 0)
 
     def price_zone_delivery(self,alert,status):
         if self.conn is not None:
             self.conn.execute("UPDATE scalp_price_zone_alerts SET delivery=%s WHERE alert_id=%s",
-                              (status,alert["alert_id"]))
+                              (status,alert.get("event_id",alert["alert_id"])))
             self.conn.commit()
 
     def lock(self):

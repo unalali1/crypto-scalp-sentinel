@@ -15,7 +15,8 @@ from .journal import Journal
 from .notifier import format_signal, send_telegram
 from .research import candidate_v3, correlated, regime
 from .confluence import detect_confluences, format_confluence_alert
-from .price_zones import detect_price_zones, nearby_zone_alert, should_watch_zones, format_price_zone_alert
+from .price_zones import (detect_price_zones, nearby_zone_alert, should_watch_zones,
+                          format_price_zone_alert, format_price_zone_digest, current_price)
 from .storage import Cooldowns
 from .tracker import track_signals
 
@@ -34,6 +35,8 @@ class Runner:
         self.pending=set()
         self.level_watch=set()
         self.level_zones={}
+        self.fib_digest_queue={}
+        self.last_fib_digest_bucket=int(time.time()*1000)//900000
         self.full_bucket=None
         self.exchange={}
         self.clock_offset=0
@@ -94,6 +97,7 @@ class Runner:
                             log.warning("price_zone_eval_failed symbol=%s kind=%s",sym,type(exc).__name__)
                     zones=self.level_zones.get(sym,[])
                     if zones:
+                        self.journal.observe_price_zones(sym,zones,current_price(snap),now_ms)
                         alert=nearby_zone_alert(sym,snap,zones,tick)
                         if alert:
                             level_alerts.append(alert)
@@ -235,9 +239,17 @@ class Runner:
         return sent
 
     def deliver_price_zones(self,alerts,now_ms):
-        """Send separate neutral proximity alerts for structural price zones."""
+        """Throttle strong zone alerts and batch standalone Fib levels every 15 minutes."""
         sent=0
-        for alert in alerts:
+        immediate=sorted((a for a in alerts if a.get("strength")!="digest"),
+                         key=lambda a:(-len(a["sources"]),a["distance"]))
+        digests=[a for a in alerts if a.get("strength")=="digest"]
+        for alert in digests:
+            self.fib_digest_queue[alert["alert_id"]]=alert
+        for alert in immediate:
+            if self.journal.recent_price_zone_count(now_ms)>=3:
+                log.info("price_zone_rate_limited symbol=%s window=15m cap=3",alert["symbol"])
+                continue
             if self.cfg.dry_run:
                 log.info("DRY_RUN price_zone symbol=%s center=%s sources=%s zone_id=%s",
                          alert["symbol"],alert["center"],",".join(alert["sources"]),alert["alert_id"])
@@ -256,6 +268,36 @@ class Runner:
                 log.info("price_zone_telegram_sent symbol=%s center=%s sources=%s",
                          alert["symbol"],alert["center"],",".join(alert["sources"]))
                 sent+=1
+
+        bucket=now_ms//900000
+        if bucket>self.last_fib_digest_bucket:
+            self.last_fib_digest_bucket=bucket
+            queued=list(self.fib_digest_queue.values())
+            self.fib_digest_queue.clear()
+            eligible=[]
+            for alert in queued:
+                alert["alert_type"]="digest"
+                if self.cfg.dry_run:
+                    eligible.append(alert)
+                elif self.journal.claim_price_zone(alert,now_ms):
+                    eligible.append(alert)
+            if eligible:
+                if self.cfg.dry_run:
+                    log.info("DRY_RUN price_zone_digest zones=%d",len(eligible))
+                else:
+                    try:
+                        send_telegram(self.cfg.telegram_token,self.cfg.telegram_chat_id,
+                                      format_price_zone_digest(eligible,self.cfg.timezone))
+                    except Exception as exc:
+                        for alert in eligible:
+                            self.journal.price_zone_delivery(alert,"uncertain")
+                        log.warning("price_zone_digest_delivery_uncertain zones=%d kind=%s",
+                                    len(eligible),type(exc).__name__)
+                    else:
+                        for alert in eligible:
+                            self.journal.price_zone_delivery(alert,"sent")
+                        log.info("price_zone_digest_sent zones=%d",len(eligible))
+                        sent+=1
         return sent
 
     def deliver(self,signals,cohort,now_ms):

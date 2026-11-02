@@ -116,7 +116,7 @@ def detect_price_zones(symbol, snapshot, tick_size):
     zones = []
     for group in _cluster(points, tolerance):
         labels = sorted({label for _, label in group})
-        period_kinds = {label[0] for label in labels if "SMA" not in label}
+        period_kinds = {label.split()[0] for label in labels if label.startswith(("D ", "W ", "M ", "Q"))}
         ma_count = sum("SMA" in label for label in labels)
         is_period_cluster = len(group) >= 3 and len(period_kinds) >= 2
         is_ma_cluster = ma_count >= 2
@@ -128,12 +128,17 @@ def detect_price_zones(symbol, snapshot, tick_size):
         high = max(value for value, _ in group)
         center = sum(value for value, _ in group) / len(group)
         sources = sorted({label for _, label in group})
-        key = f"{symbol}|{round(center / max(tolerance, float(tick_size)))}|{'/'.join(sources)}"
+        stable_step = max(price * 0.001, float(tick_size) * 10)
+        key = f"{symbol}|{round(center / stable_step)}"
         zone_id = sha1(key.encode()).hexdigest()[:20]
+        fib_sources = [label for label in sources
+                       if " fib " in f" {label.lower()} " or "extension " in label.lower()]
+        strong = is_period_cluster or is_ma_cluster or (bool(fib_sources) and len(sources) > len(fib_sources))
         zones.append({
             "zone_id": zone_id, "symbol": symbol, "low": low, "high": high,
             "center": center, "sources": sources, "points": len(group),
             "tolerance": tolerance, "atr1h": atr,
+            "strength": "strong" if strong else "digest",
         })
     return zones
 
@@ -192,37 +197,60 @@ def nearby_zone_alert(symbol, snapshot, zones, tick_size):
              if _distance(price, zone) <= _buffer(price, zone)]
     if not close:
         return None
-    zone, distance = min(close, key=lambda item: item[1])
-    approach = _approach(snapshot, price, zone)
+    close.sort(key=lambda item: item[0]["center"])
+    groups = []
+    for zone, distance in close:
+        if groups and zone["low"] - max(item[0]["high"] for item in groups[-1]) <= max(
+                0.5 * zone["atr1h"], price * 0.002):
+            groups[-1].append((zone, distance))
+        else:
+            groups.append([(zone, distance)])
+    members, distance = min(groups, key=lambda group: min(item[1] for item in group))
+    low = min(item[0]["low"] for item in members)
+    high = max(item[0]["high"] for item in members)
+    center = (low + high) / 2
+    sources = sorted({source for item, _ in members for source in item["sources"]})
+    merged = {"low": low, "high": high}
+    approach = _approach(snapshot, price, merged)
     if approach is None:
         return None
     role, direction = approach
+    stable_step = max(price * 0.001, float(tick_size) * 10)
+    zone_id = sha1(f"{symbol}|{round(center / stable_step)}".encode()).hexdigest()[:20]
+    is_strong = any(item[0].get("strength") == "strong" for item in members)
     return {
-        "alert_id": f"{symbol}:{zone['zone_id']}", "symbol": symbol,
-        "low": zone["low"], "high": zone["high"], "center": zone["center"],
-        "price": price, "distance": distance, "sources": zone["sources"],
-        "zone_id": zone["zone_id"], "tick_size": tick_size,
+        "alert_id": f"{symbol}:{zone_id}", "zone_key": min((item[0] for item in members), key=lambda item: abs(item["center"] - center))["zone_id"], "symbol": symbol,
+        "low": low, "high": high, "center": center, "atr1h": max(item[0]["atr1h"] for item in members),
+        "price": price, "distance": distance, "sources": sources,
+        "zone_id": zone_id, "tick_size": tick_size,
+        "strength": "strong" if is_strong else "digest",
         "role": role, "approach": direction,
     }
 
 
-def format_price_zone_alert(alert, tz):
+def current_price(snapshot):
+    return _price(snapshot)
+
+
+def _source_label(name):
     source_names = {
         "D open": "Daily open", "D close": "Daily close",
         "W open": "Weekly open", "W close": "Weekly close",
         "M open": "Monthly open", "M close": "Monthly close",
     }
-    def label(name):
-        if name in source_names:
-            return source_names[name]
-        if name.startswith("Q"):
-            return name.replace("Q", "Quarterly ", 1)
-        if name.startswith("D "):
-            return name.replace("D ", "Daily ", 1)
-        if name.startswith("W "):
-            return name.replace("W ", "Weekly ", 1)
-        return name
-    source_text = ", ".join(label(name) for name in alert["sources"])
+    if name in source_names:
+        return source_names[name]
+    if name.startswith("Q"):
+        return name.replace("Q", "Quarterly ", 1)
+    if name.startswith("D "):
+        return name.replace("D ", "Daily ", 1)
+    if name.startswith("W "):
+        return name.replace("W ", "Weekly ", 1)
+    return name
+
+
+def format_price_zone_alert(alert, tz):
+    source_text = ", ".join(_source_label(name) for name in alert["sources"])
     low, high = alert["low"], alert["high"]
     band = f"{low:,.8g}" if low == high else f"{low:,.8g} – {high:,.8g}"
     distance = "Inside the zone" if alert["distance"] == 0 else f"{alert['distance']:,.8g}"
@@ -238,3 +266,17 @@ def format_price_zone_alert(alert, tz):
         "Context only. This is not a trade signal and includes no entry, stop, or targets.",
         "Based on completed Daily/Weekly/Monthly/Quarterly open-close levels and/or Daily/Weekly SMAs.",
     ])
+
+
+def format_price_zone_digest(alerts, tz):
+    lines = ["🧭 PRICE CONFLUENCE DIGEST | Fib levels", ""]
+    for alert in sorted(alerts, key=lambda item: (item["symbol"], item["distance"])):
+        low, high = alert["low"], alert["high"]
+        band = f"{low:,.8g}" if low == high else f"{low:,.8g} – {high:,.8g}"
+        sources = ", ".join(_source_label(name) for name in alert["sources"])
+        lines.append(
+            f"{alert['symbol']} · {alert['role']} · {band} · price {alert['price']:,.8g} "
+            f"· {sources}"
+        )
+    lines.extend(["", "Context only. These are proximity observations, not trade signals."])
+    return "\n".join(lines)
