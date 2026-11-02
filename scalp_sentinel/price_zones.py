@@ -192,7 +192,7 @@ def format_price_zone_alert(alert, tz):
     low, high = alert["low"], alert["high"]
     band = f"{low:,.8g}" if low == high else f"{low:,.8g} – {high:,.8g}"
     distance = "Inside the zone" if alert["distance"] == 0 else f"{alert['distance']:,.8g}"
-    return "\\n".join([
+    return "\n".join([
         f"🧭 PRICE CONFLUENCE | {alert['symbol']}",
         f"Zone type: {alert['role']}",
         f"Approach: {alert['approach']}",
