@@ -192,6 +192,14 @@ class Delivery(unittest.TestCase):
             self.assertEqual(r.deliver([self.s],'primary',self.now),0)
             self.assertFalse(r.journal.memory_setups)
 
+    def test_primary_delivery_logs_quote_phase_without_changing_gate(self):
+        r=self.runner()
+        with patch('scalp_sentinel.main.time.time',return_value=self.now/1000),\
+             self.assertLogs('sentinel',level='INFO') as logs:
+            self.assertEqual(r.deliver([self.s],'primary',self.now),1)
+        self.assertTrue(any('primary_delivery_phases' in line and 'quote_fetch_ms=' in line
+                            and 'result=ready' in line for line in logs.output))
+
     def test_portfolio_cap_is_enforced(self):
         r=self.runner()
         r.journal.memory_trades=[dict(cohort='primary',symbol=str(i),side='LONG',status='OPEN',sent_at_ms=0) for i in range(3)]
