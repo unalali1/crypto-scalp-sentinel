@@ -50,6 +50,18 @@ def aggregate(trades):
     return summarize(all_rows)
 
 
+def console_report(result):
+    """Keep Railway's single log entry small without hiding the split result."""
+    keys=("strategy","start_ms","end_ms","fetched_symbols","skipped_symbols",
+          "development_end_ms","holdout_start_ms","statuses","data_gaps",
+          "rejected","assumptions")
+    report={key:result[key] for key in keys}
+    for period in ("development","holdout"):
+        report[period]=next((row for row in result[period]
+                             if row["symbol"]=="ALL" and row["side"]=="ALL"),None)
+    return report
+
+
 def replay(client,symbols,start_ms,end_ms,spread_bps=5.0):
     """Chronological replay with a time holdout and conservative 1m fills."""
     universe=tuple(dict.fromkeys(("BTCUSDT",*symbols)))
@@ -191,7 +203,8 @@ def main():
         parser.error("a replay window of at least 300 days is required")
     symbols=tuple(x.strip().upper() for x in args.symbols.split(",") if x.strip())
     client=BinanceClient("https://fapi.binance.com")
-    print(json.dumps(replay(client,symbols,start,end),ensure_ascii=False,separators=(",",":")))
+    print(json.dumps(console_report(replay(client,symbols,start,end)),
+                     ensure_ascii=False,separators=(",",":")),flush=True)
 
 
 if __name__=="__main__":
