@@ -1,4 +1,5 @@
 import copy
+import json
 import threading
 import unittest
 from types import SimpleNamespace
@@ -13,6 +14,42 @@ from scalp_sentinel.binance_client import DataPending
 
 
 class Delivery(unittest.TestCase):
+    def test_price_zone_observation_batches_database_writes(self):
+        class RecordingConnection:
+            def __init__(self):
+                self.calls=[]
+                self.commits=0
+
+            def execute(self,sql,args):
+                self.calls.append((sql,args))
+
+            def commit(self):
+                self.commits+=1
+
+        journal=Journal()
+        conn=RecordingConnection()
+        journal.conn=conn
+        zones=[dict(zone_id=str(i),low=90+i,high=91+i,atr1h=2) for i in range(40)]
+        journal.observe_price_zones('BTCUSDT',zones,100,123)
+        self.assertEqual(len(conn.calls),1)
+        self.assertEqual(conn.commits,1)
+        sql,args=conn.calls[0]
+        self.assertIn('ON CONFLICT(symbol,zone_key)',sql)
+        self.assertIn('scalp_price_zone_state.armed OR',sql)
+        self.assertEqual(len(json.loads(args[2])),40)
+        self.assertEqual(args[:2],('BTCUSDT',123))
+
+    def test_price_zone_rearms_only_after_price_moves_away(self):
+        journal=Journal()
+        zone=dict(zone_id='one',low=99,high=101,atr1h=2)
+        journal.observe_price_zones('BTCUSDT',[zone],100,1)
+        state=journal.memory_price_zone_state[('BTCUSDT','one')]
+        state['armed']=False
+        journal.observe_price_zones('BTCUSDT',[zone],101.5,2)
+        self.assertFalse(state['armed'])
+        journal.observe_price_zones('BTCUSDT',[zone],102.1,3)
+        self.assertTrue(state['armed'])
+
     def test_context_alerts_are_batched_without_creating_trade_signals(self):
         r=Runner.__new__(Runner)
         r.cfg=config(dry_run=False)
