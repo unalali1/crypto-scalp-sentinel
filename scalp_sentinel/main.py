@@ -9,14 +9,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .binance_client import BinanceClient, BinanceError, DataPending
 from .config import Config
-from .engine import evaluate, prefilter_rejections, confirm_15m_close
+from .engine import evaluate, prefilter_rejections
 from .execution import prepare
 from .journal import Journal
 from .notifier import format_signal, send_telegram
-from .research import candidate_v3, correlated, regime
-from .confluence import detect_confluences, format_confluence_alert
-from .price_zones import (detect_price_zones, nearby_zone_alert, should_watch_zones,
-                          format_price_zone_alert, format_price_zone_digest, current_price)
+from .research import candidate_v3, correlated, regime, v2_shadow_variants
+from .confluence import detect_confluences, format_confluence_digest
+from .price_zones import (detect_price_zones, nearby_zone_alert,
+                           format_price_zone_digest, current_price)
 from .storage import Cooldowns
 from .tracker import track_signals
 
@@ -33,8 +33,8 @@ class Runner:
         self.snapshots={}
         self.watch=set()
         self.pending=set()
-        self.level_watch=set()
         self.level_zones={}
+        self.last_context_bucket=None
         self.fib_digest_queue={}
         self.last_fib_digest_bucket=int(time.time()*1000)//900000
         self.full_bucket=None
@@ -48,6 +48,7 @@ class Runner:
 
     def tick(self, now_ms=None):
         cfg=self.cfg
+        tick_started=time.monotonic()
         self.journal.alive()  # lost database session also loses the worker lock
         if now_ms is None:
             now_ms=int(time.time()*1000)
@@ -60,15 +61,17 @@ class Runner:
         symbols=[s for s in cfg.symbols if s in self.exchange]
         if not symbols:
             raise RuntimeError('No supported configured symbols')
-        wanted=set(symbols) if full else (self.watch | self.pending | self.level_watch) & set(symbols)
+        # Context-only price zones never force a 1m signal scan of the full
+        # universe. Their 15m pass happens after time-sensitive trade delivery.
+        wanted=set(symbols) if full else (self.watch | self.pending) & set(symbols)
         wanted.add('BTCUSDT')
         # Open shadow exposures must have current correlation context too.
         for peer in self.journal.active('v3-shadow')+self.journal.active('primary'):
             wanted.add(peer['symbol'])
         candidates={}
+        research_by_symbol={}
         confluence_alerts=[]
         level_alerts=[]
-        next_level_watch=set()
         errors=[]
         pending=[]
         data_pending_counts={}
@@ -76,36 +79,47 @@ class Runner:
         gate_fail={}
         prefilter_counts={}
         evaluated_sides=0
+        primary_eligible=sent=shadow_count=shadow_15m_count=0
+        shadow_15m_base=shadow_15m_confirmed=0
+        pending_v3=[]
+        btc=None
+
+        def assess_v3(sym,snap,tick,side):
+            nonlocal primary_eligible,sent,shadow_count
+            if not (cfg.shadow_enabled or cfg.primary_strategy=='v3'):
+                return
+            if "oi5" not in snap or btc is None:
+                if "oi5" not in snap:
+                    log.info("shadow_candidate_skipped symbol=%s side=%s dataset=oi5",sym,side)
+                else:
+                    pending_v3.append((sym,snap,tick,side))
+                return
+            v3=candidate_v3(sym,side,snap,tick,cfg,btc)
+            if v3 is None:
+                return
+            research_by_symbol[sym].append(v3)
+            if v3.eligible:
+                if cfg.primary_strategy=='v3':
+                    primary_eligible+=1
+                    sent+=self.deliver([v3],'primary',now_ms)
+                elif cfg.shadow_enabled:
+                    shadow_count+=self.deliver([v3],'v3-shadow',now_ms)
+
         with ThreadPoolExecutor(max_workers=3) as pool:
-            jobs={pool.submit(self.client.snapshot,s,now_ms):s for s in wanted if s in self.exchange}
+            jobs={pool.submit(self.client.snapshot,s,now_ms):s
+                  for s in sorted(wanted,key=lambda s:(s!='BTCUSDT',s)) if s in self.exchange}
             for future in as_completed(jobs):
                 sym=jobs[future]
                 stage="snapshot"
                 try:
                     snap=future.result()
+                    completed_ms=int(time.time()*1000)
                     stage="symbol_metadata"
                     tick=next(f['tickSize'] for f in self.exchange[sym]['filters'] if f['filterType']=='PRICE_FILTER')
                     snap['tick_size']=tick
                     self.snapshots[sym]=snap
-                    stage="zone_watch"
-                    if full and sym in symbols:
-                        try:
-                            confluence_alerts.extend(detect_confluences(sym,snap,tick))
-                        except Exception as exc:
-                            log.warning("confluence_eval_failed symbol=%s kind=%s",sym,type(exc).__name__)
-                        try:
-                            self.level_zones[sym]=detect_price_zones(sym,snap,tick)
-                        except Exception as exc:
-                            self.level_zones[sym]=[]
-                            log.warning("price_zone_eval_failed symbol=%s kind=%s",sym,type(exc).__name__)
-                    zones=self.level_zones.get(sym,[])
-                    if zones:
-                        self.journal.observe_price_zones(sym,zones,current_price(snap),now_ms)
-                        alert=nearby_zone_alert(sym,snap,zones,tick)
-                        if alert:
-                            level_alerts.append(alert)
-                        if should_watch_zones(snap,zones):
-                            next_level_watch.add(sym)
+                    if sym=='BTCUSDT':
+                        btc=snap
                     if snap.get("oi5_pending_reason"):
                         data_pending_counts["oi5"]=data_pending_counts.get("oi5",0)+1
                         log.info("shadow_data_pending symbol=%s dataset=oi5 reason=%s",
@@ -114,6 +128,7 @@ class Runner:
                         stage="signal_evaluation"
                         evaluated=evaluate(sym,snap,tick,cfg)
                         candidates[sym]=evaluated
+                        research_by_symbol[sym]=[]
                         if not evaluated:
                             reasons=prefilter_rejections(snap,cfg) or ["candidate_not_returned"]
                             for reason in reasons:
@@ -129,26 +144,63 @@ class Runner:
                             log.info("candidate_diagnosis symbol=%s side=%s score=%d eligible=%s failed_gates=%s",
                                      sym,candidate_signal.side,candidate_signal.score,
                                      candidate_signal.eligible,json.dumps(failed,separators=(",",":")))
+                            s=candidate_signal
+                            s.strategy_version='v2.1'
+                            s.research=regime(snap)
+                            s.research.update({k:snap.get(k) for k in ('flow_source','oi_age_ms','oi5_age_ms')})
+                            s.research['snapshot_completed_ms']=completed_ms
+                            if s.eligible:
+                                log.info("eligible_latency symbol=%s side=%s candle_age_ms=%d",
+                                         sym,s.side,int(time.time()*1000)-(s.snapshot_ts+60000))
+                                stage="signal_delivery"
+                                if cfg.primary_strategy=='v2.1':
+                                    primary_eligible+=1
+                                    sent+=self.deliver([s],'primary',now_ms)
+                                if cfg.shadow_enabled and cfg.primary_strategy=='v2.1':
+                                    shadow_15m_base+=1
+                                    for variant in v2_shadow_variants(s,snap,now_ms):
+                                        research_by_symbol[sym].append(variant)
+                                        cohort=variant.strategy_version
+                                        count=self.deliver([variant],cohort,now_ms)
+                                        if cohort=='v2.1-15m-confirm':
+                                            shadow_15m_confirmed+=1
+                                            shadow_15m_count+=count
+                                    if now_ms//60000 % 15==0:
+                                        control=copy.deepcopy(s)
+                                        control.strategy_version='v2-control-15m'
+                                        control.setup_id=f"{s.setup_id}:15m-sample:{now_ms//900000}"
+                                        research_by_symbol[sym].append(control)
+                                        self.deliver([control],'v2-control-15m',now_ms)
+                            stage="signal_delivery"
+                            assess_v3(sym,snap,tick,s.side)
+                    if sym=='BTCUSDT' and pending_v3:
+                        stage="signal_delivery"
+                        delayed,pending_v3=pending_v3,[]
+                        for pending_sym,pending_snap,pending_tick,pending_side in delayed:
+                            assess_v3(pending_sym,pending_snap,pending_tick,pending_side)
                 except DataPending as exc:
                     self.snapshots.pop(sym,None)
+                    candidates.pop(sym,None)
+                    research_by_symbol.pop(sym,None)
                     pending.append(sym)
                     data_pending_counts[exc.dataset]=data_pending_counts.get(exc.dataset,0)+1
                     log.info('data_pending symbol=%s reason=%s',sym,str(exc))
                 except Exception as exc:
+                    if stage=="signal_delivery":
+                        raise
                     self.snapshots.pop(sym,None)
+                    candidates.pop(sym,None)
+                    research_by_symbol.pop(sym,None)
                     errors.append(sym)
                     detail=str(exc).replace("\\n"," ")[:160]
                     log.warning('snapshot_failed symbol=%s stage=%s kind=%s detail=%s',
                                 sym,stage,type(exc).__name__,detail or 'no_detail')
         if full:
-            self.level_watch=next_level_watch
             self.watch={sym for sym,signals in candidates.items()
                         if any(s.checks['15m trend'] and s.checks['5m structure'] for s in signals)}
             self.full_bucket=now_ms//300000
             self.pending=set(pending+errors)
         else:
-            self.level_watch.difference_update(wanted)
-            self.level_watch.update(next_level_watch)
             self.pending.difference_update(wanted)
             self.pending.update(pending+errors)
             for sym,signals in candidates.items():
@@ -156,50 +208,11 @@ class Runner:
                     self.watch.add(sym)
                 else:
                     self.watch.discard(sym)
-        primary=[]
-        shadow=[]
-        shadow_15m=[]
-        shadow_15m_base=0
-        shadow_15m_confirmed=0
-        control=[]
-        btc=self.snapshots.get('BTCUSDT')
-        if btc and btc['asof_ms']!=now_ms:
-            btc=None
+        if pending_v3:
+            log.info("shadow_data_pending dataset=btc_context candidates=%d",len(pending_v3))
         for sym,signals in candidates.items():
             snap=self.snapshots[sym]
-            research=[]
-            for s in signals:
-                s.strategy_version='v2.1'
-                s.research=regime(snap)
-                s.research.update({k:snap.get(k) for k in ('flow_source','oi_age_ms','oi5_age_ms')})
-                if (cfg.shadow_enabled or cfg.primary_strategy=='v3') and "oi5" in snap:
-                    v3=candidate_v3(sym,s.side,snap,snap['tick_size'],cfg,btc)
-                    if v3:
-                        research.append(v3)
-                        if v3.eligible:
-                            (primary if cfg.primary_strategy=='v3' else shadow).append(v3)
-                elif cfg.shadow_enabled or cfg.primary_strategy=='v3':
-                    log.info("shadow_candidate_skipped symbol=%s side=%s dataset=oi5",
-                             sym,s.side)
-                if s.eligible:
-                    if cfg.primary_strategy=='v2.1':
-                        primary.append(s)
-                    if cfg.shadow_enabled and cfg.primary_strategy=='v2.1':
-                        shadow_15m_base+=1
-                        confirmed,confirm_close_ms=confirm_15m_close(s.side,snap,now_ms)
-                        if confirmed:
-                            variant=copy.deepcopy(s)
-                            variant.strategy_version='v2.1-15m-confirm'
-                            variant.checks=dict(s.checks,**{'15m close confirmation':True})
-                            variant.score=s.score+1
-                            variant.setup_id=f"{s.setup_id}:15m-close:{confirm_close_ms}"
-                            variant.research=copy.deepcopy(s.research)
-                            shadow_15m.append(variant)
-                            research.append(variant)
-                            shadow_15m_confirmed+=1
-                    if cfg.shadow_enabled and now_ms//60000 % 15==0:
-                        control.append(copy.deepcopy(s))
-            self.journal.archive(sym,snap,now_ms,signals+research)
+            self.journal.archive(sym,snap,now_ms,signals+research_by_symbol[sym])
         # Archive BTC even if it is excluded from the user watchlist.
         if btc and 'BTCUSDT' not in candidates:
             self.journal.archive('BTCUSDT',btc,now_ms,[])
@@ -208,16 +221,35 @@ class Runner:
             log.warning("scan_degraded failed=%d attempted=%d",len(errors),attempted)
         if attempted and len(errors)>=attempted:
             raise RuntimeError('all_snapshots_failed')
-        sent=self.deliver(primary,'primary',now_ms)
-        shadow_count=self.deliver(shadow,'v3-shadow',now_ms) if cfg.shadow_enabled else 0
-        shadow_15m_count=self.deliver(shadow_15m,'v2.1-15m-confirm',now_ms) if cfg.shadow_enabled and cfg.primary_strategy=='v2.1' else 0
-        if cfg.shadow_enabled:
-            self.deliver(control,'v2-control-15m',now_ms)
+        # Context is sampled once per 15m and never holds up candidate delivery.
+        context_bucket=now_ms//900000
+        context_due=full and context_bucket!=self.last_context_bucket
+        if context_due:
+            self.last_context_bucket=context_bucket
+            for sym in candidates:
+                snap=self.snapshots[sym]
+                tick=snap['tick_size']
+                try:
+                    confluence_alerts.extend(detect_confluences(sym,snap,tick))
+                except Exception as exc:
+                    log.warning("confluence_eval_failed symbol=%s kind=%s",sym,type(exc).__name__)
+                try:
+                    zones=detect_price_zones(sym,snap,tick)
+                    self.level_zones[sym]=zones
+                    if zones:
+                        self.journal.observe_price_zones(sym,zones,current_price(snap),now_ms)
+                        alert=nearby_zone_alert(sym,snap,zones,tick)
+                        if alert:
+                            level_alerts.append(alert)
+                except Exception as exc:
+                    log.warning("price_zone_eval_failed symbol=%s kind=%s",sym,type(exc).__name__)
         confluence_sent=self.deliver_confluences(confluence_alerts,now_ms)
         level_sent=self.deliver_price_zones(level_alerts,now_ms)
         log.info('scan_finished mode=%s full=%s scanned=%d watching=%d eligible=%d delivered=%d confluence=%d level_zones=%d shadow_v3=%d shadow_15m_confirm=%d confirm_candidates=%d/%d failed=%d pending=%d',
-                 cfg.primary_strategy,full,len(candidates),len(self.watch),len(primary),sent,confluence_sent,level_sent,
+                 cfg.primary_strategy,full,len(candidates),len(self.watch),primary_eligible,sent,confluence_sent,level_sent,
                  shadow_count,shadow_15m_count,shadow_15m_confirmed,shadow_15m_base,len(errors),len(pending))
+        log.info("scan_duration_ms=%d context_due=%s",
+                 int((time.monotonic()-tick_started)*1000),context_due)
         log.info("signal_diagnostics symbols=%d side_evaluations=%d prefilter_rejections=%s gates_passed=%s gates_failed=%s data_pending=%s",
                  len(candidates),evaluated_sides,
                  json.dumps(prefilter_counts,sort_keys=True,separators=(",",":")),
@@ -239,8 +271,9 @@ class Runner:
         return sent
 
     def deliver_confluences(self,alerts,now_ms):
-        """Send separate directional context alerts; never create paper trades."""
+        """Batch context observations; never create paper trades."""
         sent=0
+        claimed=[]
         for alert in alerts:
             if self.cfg.dry_run:
                 log.info("DRY_RUN confluence symbol=%s side=%s timeframe=%s indicators=%s zone_id=%s",
@@ -249,18 +282,21 @@ class Runner:
                 continue
             if not self.journal.claim_confluence(alert,now_ms):
                 continue
+            claimed.append(alert)
+        for start in range(0,len(claimed),15):
+            group=claimed[start:start+15]
             try:
                 send_telegram(self.cfg.telegram_token,self.cfg.telegram_chat_id,
-                              format_confluence_alert(alert,self.cfg.timezone))
+                              format_confluence_digest(group,self.cfg.timezone))
             except Exception as exc:
-                self.journal.confluence_delivery(alert,"uncertain")
-                log.warning("confluence_delivery_uncertain symbol=%s side=%s timeframe=%s kind=%s",
-                            alert["symbol"],alert["side"],alert["timeframe"],type(exc).__name__)
+                for alert in group:
+                    self.journal.confluence_delivery(alert,"uncertain")
+                log.warning("confluence_delivery_uncertain items=%d kind=%s",
+                            len(group),type(exc).__name__)
             else:
-                self.journal.confluence_delivery(alert,"sent")
-                log.info("confluence_telegram_sent symbol=%s side=%s timeframe=%s indicators=%s",
-                         alert["symbol"],alert["side"],alert["timeframe"],
-                         ",".join(alert["indicators"]))
+                for alert in group:
+                    self.journal.confluence_delivery(alert,"sent")
+                log.info("confluence_digest_sent items=%d",len(group))
                 sent+=1
         return sent
 
@@ -272,6 +308,7 @@ class Runner:
         digests=[a for a in alerts if a.get("strength")=="digest"]
         for alert in digests:
             self.fib_digest_queue[alert["alert_id"]]=alert
+        claimed=[]
         for alert in immediate:
             if self.journal.recent_price_zone_count(now_ms)>=3:
                 log.info("price_zone_rate_limited symbol=%s window=15m cap=3",alert["symbol"])
@@ -282,17 +319,20 @@ class Runner:
                 continue
             if not self.journal.claim_price_zone(alert,now_ms):
                 continue
+            claimed.append(alert)
+        if claimed:
             try:
                 send_telegram(self.cfg.telegram_token,self.cfg.telegram_chat_id,
-                              format_price_zone_alert(alert,self.cfg.timezone))
+                              format_price_zone_digest(claimed,self.cfg.timezone,"Strong zones"))
             except Exception as exc:
-                self.journal.price_zone_delivery(alert,"uncertain")
-                log.warning("price_zone_delivery_uncertain symbol=%s kind=%s",
-                            alert["symbol"],type(exc).__name__)
+                for alert in claimed:
+                    self.journal.price_zone_delivery(alert,"uncertain")
+                log.warning("price_zone_delivery_uncertain items=%d kind=%s",
+                            len(claimed),type(exc).__name__)
             else:
-                self.journal.price_zone_delivery(alert,"sent")
-                log.info("price_zone_telegram_sent symbol=%s center=%s sources=%s",
-                         alert["symbol"],alert["center"],",".join(alert["sources"]))
+                for alert in claimed:
+                    self.journal.price_zone_delivery(alert,"sent")
+                log.info("price_zone_digest_sent items=%d",len(claimed))
                 sent+=1
 
         bucket=now_ms//900000
@@ -328,39 +368,42 @@ class Runner:
 
     def deliver(self,signals,cohort,now_ms):
         cfg=self.cfg
+        delivery_started_ms=int(time.time()*1000)
         if cohort=='primary' and self.journal.pending_delivery():
             log.error('delivery_uncertain_primary_paused reconciliation_required=true')
             return 0
         peers=self.journal.active(cohort)
         sent=0
-        recent=self.journal.recent_count(cohort,now_ms)
+        recent=self.journal.recent_count(cohort,delivery_started_ms)
         for s in sorted(signals,key=lambda s:(s.score,s.rvol),reverse=True):
             if sent+recent>=cfg.max_signals_per_run or len(peers)>=cfg.max_open_signals:
-                self.journal.decision(s,cohort,now_ms,'exposure_or_rate_limit')
+                self.journal.decision(s,cohort,delivery_started_ms,'exposure_or_rate_limit')
                 continue
             if any(p['symbol']==s.symbol for p in peers):
-                self.journal.decision(s,cohort,now_ms,'symbol_already_active')
+                self.journal.decision(s,cohort,delivery_started_ms,'symbol_already_active')
                 continue
             minutes=max(cfg.cooldown_minutes,240 if s.side=='SHORT' else 180)
             if cohort=='primary':
                 if not self.storage.allowed(s.symbol,s.side,minutes):
-                    self.journal.decision(s,cohort,now_ms,'cooldown')
+                    self.journal.decision(s,cohort,delivery_started_ms,'cooldown')
                     continue
-            elif not self.journal.cooldown(cohort,s,minutes,now_ms):
-                self.journal.decision(s,cohort,now_ms,'cooldown')
+            elif not self.journal.cooldown(cohort,s,minutes,delivery_started_ms):
+                self.journal.decision(s,cohort,delivery_started_ms,'cooldown')
                 continue
             if s.strategy_version=='v3' and correlated(s,peers,self.snapshots,cfg.correlation_threshold):
-                self.journal.decision(s,cohort,now_ms,'correlation')
+                self.journal.decision(s,cohort,delivery_started_ms,'correlation')
                 continue
             # Fresh quote directly before each delivery; never reuse scan book.
             book=self.client.get('/fapi/v1/ticker/bookTicker',symbol=s.symbol)
             decision=int(time.time()*1000)
             reason=prepare(s,book,decision,cfg)
+            log.info("delivery_latency cohort=%s symbol=%s side=%s candle_age_ms=%d result=%s",
+                     cohort,s.symbol,s.side,decision-(s.snapshot_ts+60000),reason or "ready")
             if reason:
-                self.journal.decision(s,cohort,now_ms,reason)
+                self.journal.decision(s,cohort,decision,reason)
                 continue
             if not self.journal.claim(cohort,s,decision):
-                self.journal.decision(s,cohort,now_ms,'setup_already_used')
+                self.journal.decision(s,cohort,decision,'setup_already_used')
                 continue
             if cohort=='primary' and not cfg.dry_run:
                 try:
@@ -378,7 +421,7 @@ class Runner:
                 if cfg.dry_run:
                     log.info('DRY_RUN cohort=%s symbol=%s side=%s',cohort,s.symbol,s.side)
             peers.append(dict(symbol=s.symbol,side=s.side))
-            self.journal.decision(s,cohort,now_ms,'sent' if cohort=='primary' and not cfg.dry_run else 'paper_recorded')
+            self.journal.decision(s,cohort,decision,'sent' if cohort=='primary' and not cfg.dry_run else 'paper_recorded')
             sent+=1
         return sent
 

@@ -5,7 +5,7 @@ from unittest.mock import patch
 from scalp_sentinel.config import Config
 from scalp_sentinel.engine import candidate
 from scalp_sentinel.execution import prepare
-from scalp_sentinel.research import candidate_v3, correlation, correlated, regime
+from scalp_sentinel.research import candidate_v3, correlation, correlated, regime, v2_shadow_variants
 from scalp_sentinel.journal import Journal
 from test_v2_engine import fixture
 
@@ -37,6 +37,8 @@ class Execution(unittest.TestCase):
         self.book['time']=self.now-20000
         self.assertEqual(prepare(self.s,self.book,self.now,self.cfg),'stale_quote')
         self.assertEqual(prepare(self.s,self.book,self.now+180000,self.cfg),'stale_trigger')
+        del self.book['time']
+        self.assertEqual(prepare(self.s,self.book,self.now,self.cfg),'missing_quote_time')
 
     def test_small_stop_cannot_hide_execution_cost(self):
         self.s.stop=self.s.entry-.01
@@ -54,6 +56,21 @@ class Execution(unittest.TestCase):
 
 
 class Research(unittest.TestCase):
+    def test_shadow_filters_only_keep_qualified_baseline_and_do_not_mutate_it(self):
+        snap,thresholds=fixture()
+        base=candidate('TEST','LONG',snap,'0.001',thresholds)
+        base.research=regime(snap)
+        original=copy.deepcopy(base)
+        variants=v2_shadow_variants(base,snap,700*60000)
+        self.assertIn('v2.1-volume',[v.strategy_version for v in variants])
+        self.assertEqual(base,original)
+        for row in snap['5m'][-3:]:row[5]='25'
+        quiet=candidate('TEST','LONG',snap,'0.001',thresholds)
+        quiet.research=regime(snap)
+        self.assertTrue(quiet.eligible)
+        self.assertNotIn('v2.1-volume',
+                         [v.strategy_version for v in v2_shadow_variants(quiet,snap,700*60000)])
+
     def test_confirmed_three_phase_volume_can_pass_v3(self):
         snap,_=fixture()
         snap['oi5']=copy.deepcopy(snap['oi'])

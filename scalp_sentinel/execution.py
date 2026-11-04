@@ -9,7 +9,11 @@ def prepare(signal, book, now_ms, cfg):
         return "invalid_quote"
     if now_ms-(signal.snapshot_ts+60000)>90000 or now_ms<signal.snapshot_ts+60000:
         return "stale_trigger"
-    if book.get("time") and not -2000 <= now_ms-int(book["time"]) <= 15000:
+    # USD-M bookTicker supplies transaction time; a missing timestamp cannot
+    # prove that a quote is still valid at the delivery decision.
+    if book.get("time") is None:
+        return "missing_quote_time"
+    if not -2000 <= now_ms-int(book["time"]) <= 15000:
         return "stale_quote"
     spread=(ask-bid)/((ask+bid)/2)*10000
     if spread>cfg.max_spread_bps:

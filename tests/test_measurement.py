@@ -6,6 +6,19 @@ from test_v2_tracker import paper, bar
 
 
 class Measurement(unittest.TestCase):
+    def test_per_alert_return_counts_no_entry_as_zero_but_excludes_open(self):
+        winner=paper('v2.1')
+        winner.update(symbol='TEST',status='TP2_HIT',finished_at_ms=120000,
+                      journal_json={'costs_complete':True,'net_r_low':1.8,'net_r_high':1.8})
+        no_entry=dict(winner,status='NO_ENTRY',filled_at_ms=None,journal_json={})
+        pending=dict(winner,status='OPEN',finished_at_ms=None,journal_json={})
+        result=summarize([winner,no_entry,pending])[0]
+        self.assertEqual(result['signals'],3)
+        self.assertEqual(result['decision_count'],2)
+        self.assertEqual(result['no_entry'],1)
+        self.assertAlmostEqual(result['mean_net_r_low'],1.8)
+        self.assertAlmostEqual(result['mean_net_r_per_alert_low'],.9)
+
     def test_continuous_tracking_does_not_repeat_schema_ddl(self):
         from scalp_sentinel.tracker import track_signals
         conn=MagicMock()

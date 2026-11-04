@@ -1,7 +1,7 @@
 """Frozen V3 hypothesis, initially shadow-only. No fitted win probabilities."""
 from copy import deepcopy
 from math import sqrt
-from .engine import candles, ema, atr, _v2_candidate
+from .engine import candles, ema, atr, _v2_candidate, confirm_15m_close
 
 
 def regime(snapshot):
@@ -75,6 +75,34 @@ def candidate_v3(symbol, side, snapshot, tick, cfg, btc):
                       oi15_pct=oi15, oi_regime="expansion" if oi15 is not None and oi15 >= 0 else "contraction")
     s.research.update({k:snapshot.get(k) for k in ('flow_source','oi_age_ms','oi5_age_ms')})
     return s
+
+
+def v2_shadow_variants(base, snapshot, now_ms):
+    """Predeclared V2.1 filters. They only record paper outcomes, never alerts."""
+    if not base.eligible:
+        return []
+    variants = []
+    hypotheses = (
+        ("v2.1-volume", bool(base.checks["relative volume"]), "volume_required"),
+        ("v2.1-trend", base.research["regime"] == "trend", "trend_regime_required"),
+    )
+    for version, passed, hypothesis in hypotheses:
+        if passed:
+            variant = deepcopy(base)
+            variant.strategy_version = version
+            variant.setup_id = f"{base.setup_id}:{hypothesis}"
+            variant.research["hypothesis"] = hypothesis
+            variants.append(variant)
+    confirmed, closed_at = confirm_15m_close(base.side, snapshot, now_ms)
+    if confirmed:
+        variant = deepcopy(base)
+        variant.strategy_version = "v2.1-15m-confirm"
+        variant.setup_id = f"{base.setup_id}:15m-close:{closed_at}"
+        variant.checks["15m close confirmation"] = True
+        variant.score += 1
+        variant.research["hypothesis"] = "15m_close_confirmation"
+        variants.append(variant)
+    return variants
 
 
 def return_series(snapshot):
