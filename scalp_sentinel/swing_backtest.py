@@ -55,14 +55,19 @@ def replay(client,symbols,start_ms,end_ms,spread_bps=5.0):
     universe=tuple(dict.fromkeys(("BTCUSDT",*symbols)))
     info=client.symbol_info()
     data={}
+    skipped={}
     for sym in universe:
         if sym not in info or info[sym].get("contractType")!="PERPETUAL":
+            skipped[sym]="unavailable_or_not_crypto_perpetual"
             continue
-        data[sym]={
-            "1d":fetch_bars(client,sym,"1d",DAY,start_ms-410*DAY,end_ms),
-            "4h":fetch_bars(client,sym,"4h",FOUR_HOURS,start_ms-20*DAY,end_ms),
-            "1h":fetch_bars(client,sym,"1h",HOUR,start_ms-3*DAY,end_ms),
-        }
+        try:
+            data[sym]={
+                "1d":fetch_bars(client,sym,"1d",DAY,start_ms-410*DAY,end_ms),
+                "4h":fetch_bars(client,sym,"4h",FOUR_HOURS,start_ms-20*DAY,end_ms),
+                "1h":fetch_bars(client,sym,"1h",HOUR,start_ms-3*DAY,end_ms),
+            }
+        except (ValueError,RuntimeError) as exc:
+            skipped[sym]=type(exc).__name__
     if "BTCUSDT" not in data:
         raise ValueError("BTC context unavailable")
     trades=[]
@@ -130,7 +135,7 @@ def replay(client,symbols,start_ms,end_ms,spread_bps=5.0):
                 rejected[reason]=rejected.get(reason,0)+1
                 continue
             trade=paper_trade(s,decision)
-            trade.update(cohort="swing-shadow",strategy_version="swing-shadow")
+            trade.update(cohort="swing-shadow",strategy_version=s.strategy_version)
             start=decision//60000*60000+60000
             end=min(end_ms,decision+MAX_HOLD_MS+2*HOUR)
             bars=fetch_bars(client,s.symbol,"1m",60000,start,end)
@@ -159,6 +164,7 @@ def replay(client,symbols,start_ms,end_ms,spread_bps=5.0):
     split=start_ms+(end_ms-start_ms)*2//3
     development_end=split-MAX_HOLD_MS
     return dict(strategy="swing-trend-v1",start_ms=start_ms,end_ms=end_ms,
+                fetched_symbols=sorted(data),skipped_symbols=skipped,
                 development_end_ms=development_end,holdout_start_ms=split,
                 development=aggregate([p for p in trades if p["sent_at_ms"]<development_end]),
                 holdout=aggregate([p for p in trades if p["sent_at_ms"]>=split]),
@@ -185,7 +191,7 @@ def main():
         parser.error("a replay window of at least 300 days is required")
     symbols=tuple(x.strip().upper() for x in args.symbols.split(",") if x.strip())
     client=BinanceClient("https://fapi.binance.com")
-    print(json.dumps(replay(client,symbols,start,end),ensure_ascii=False,indent=2))
+    print(json.dumps(replay(client,symbols,start,end),ensure_ascii=False,separators=(",",":")))
 
 
 if __name__=="__main__":

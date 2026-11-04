@@ -326,11 +326,11 @@ class Journal:
                 return False
             self.memory_setups.add(key)
             trade=paper_trade(signal,now_ms)
-            trade.update(cohort=cohort,strategy_version=cohort)
+            trade.update(cohort=cohort,strategy_version=signal.strategy_version)
             self.memory_trades.append(trade)
             return True
         trade=paper_trade(signal,now_ms)
-        trade.update(cohort=cohort,strategy_version=cohort)
+        trade.update(cohort=cohort,strategy_version=signal.strategy_version)
         row=self.conn.execute("""INSERT INTO scalp_shadow_outcomes
             (cohort,setup_id,trade,status,sent_at_ms) VALUES (%s,%s,%s::jsonb,%s,%s)
             ON CONFLICT DO NOTHING RETURNING setup_id""",
