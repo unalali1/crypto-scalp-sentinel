@@ -101,6 +101,7 @@ class Swing(unittest.TestCase):
             self.assertEqual(runner.run(now),0)
         self.assertEqual(len(journal.memory_trades),1)
         self.assertEqual(journal.memory_trades[0]["cohort"],"swing-shadow")
+        self.assertEqual(journal.memory_trades[0]["strategy_version"],"swing-trend-v1")
 
     def test_fetch_history_rejects_gap_across_pages(self):
         class Client:
