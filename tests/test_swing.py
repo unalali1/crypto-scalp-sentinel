@@ -4,8 +4,8 @@ from unittest.mock import patch
 
 from scalp_sentinel.binance_client import BinanceError
 from scalp_sentinel.journal import Journal, paper_trade
-from scalp_sentinel.swing_backtest import asof, console_report, fetch_bars
-from scalp_sentinel.swing_engine import DAY, FOUR_HOURS, HOUR, daily_direction, evaluate_swing
+from scalp_sentinel.swing_backtest import aggregate, asof, console_report, fetch_bars, replay
+from scalp_sentinel.swing_engine import DAY, FOUR_HOURS, HOUR, SwingSetup, daily_direction, evaluate_swing
 from scalp_sentinel.swing_execution import MAX_HOLD_MS, prepare_swing
 from scalp_sentinel.swing_main import SwingRunner
 from scalp_sentinel.swing_market import validate_bars
@@ -116,7 +116,9 @@ class Swing(unittest.TestCase):
     def test_console_report_preserves_holdout_aggregate(self):
         base={key:None for key in ("strategy","start_ms","end_ms","fetched_symbols",
               "skipped_symbols","development_end_ms","holdout_start_ms",
-              "statuses","data_gaps","rejected","assumptions")}
+              "statuses","data_gaps","rejected","coverage","ranking",
+              "delay_minutes","spread_bps","fee_bps","slippage_bps",
+              "counterfactual_count","assumptions")}
         base["development"]=[{"symbol":"BTCUSDT","side":"LONG","signals":1},
                              {"symbol":"ALL","side":"ALL","signals":2}]
         base["holdout"]=[{"symbol":"ALL","side":"ALL","signals":3},
@@ -125,6 +127,56 @@ class Swing(unittest.TestCase):
         self.assertEqual(report["development"]["signals"],2)
         self.assertEqual(report["holdout"]["signals"],3)
         self.assertEqual(len(report),len(base))
+
+    def test_replay_keeps_rejected_candidate_outside_selected_portfolio(self):
+        t=500*DAY
+        info={sym:{"contractType":"PERPETUAL","filters":[{"filterType":"PRICE_FILTER","tickSize":"0.01"}]}
+              for sym in ("BTCUSDT","ETHUSDT","SOLUSDT")}
+        history={}
+        for sym in info:
+            rows={"1d":[bar(t-DAY,100,101,99,100,100,DAY)],
+                  "4h":[bar(t-FOUR_HOURS,100,101,99,100,100,FOUR_HOURS)],
+                  "1h":[bar(t-HOUR,100,101,99,100,100,HOUR)]}
+            rows["opens"]={key:[int(row[0]) for row in rows[key]] for key in ("1d","4h","1h")}
+            history[sym]=rows
+
+        class Client:
+            def __init__(self):
+                self.quote_starts=[]
+
+            def get(self,_path,**kwargs):
+                self.quote_starts.append(kwargs["startTime"])
+                return [bar(kwargs["startTime"],100,101,99,100,100,60000)]
+
+        def setups(sym,*_args):
+            if sym=="BTCUSDT":
+                return []
+            return [SwingSetup(sym,"LONG",t-FOUR_HOURS,f"{sym}:{t}",100,98,103,106,
+                               "0.01",2,5,50_000_000,1.2 if sym=="ETHUSDT" else 2.0,{},True,
+                               2 if sym=="ETHUSDT" else 1)]
+
+        def outcome(_client,setup,decision,_end):
+            trade=paper_trade(setup,decision)
+            trade.update(status="NO_ENTRY",finished_at_ms=decision+60000)
+            return trade,False
+
+        client=Client()
+        with patch("scalp_sentinel.swing_backtest.evaluate_swing",side_effect=setups),\
+             patch("scalp_sentinel.swing_backtest.prepare_swing",return_value=None),\
+             patch("scalp_sentinel.swing_backtest.paper_outcome",side_effect=outcome):
+            result=replay(client,("ETHUSDT","SOLUSDT"),t,t+FOUR_HOURS,
+                          delay_minutes=10,counterfactual=True,history=(info,history,{}))
+            rvol=replay(Client(),("ETHUSDT","SOLUSDT"),t,t+FOUR_HOURS,
+                        ranking="rvol",history=(info,history,{}))
+        self.assertEqual([r["symbol"] for r in result["trade_ledger"]],["ETHUSDT"])
+        self.assertEqual([r["symbol"] for r in result["counterfactual_ledger"]],["SOLUSDT"])
+        self.assertEqual([r["reason"] for r in result["candidate_decisions"]],
+                         ["paper_selected","daily_cap"])
+        self.assertEqual(client.quote_starts,[t+10*60000,t+10*60000])
+        self.assertEqual([r["symbol"] for r in rvol["trade_ledger"]],["SOLUSDT"])
+        sample=paper_trade(setups("ETHUSDT")[0],t)
+        sample["status"]="NO_ENTRY"
+        self.assertEqual({r["symbol"] for r in aggregate([sample])},{"ALL","ETHUSDT"})
 
 
 if __name__=="__main__":

@@ -100,6 +100,28 @@ Historical replay can be run on at least 300 days of USD-M kline history:
 python -m scalp_sentinel.swing_backtest --start 2025-01-01T00:00:00Z --end 2026-11-01T00:00:00Z --symbols BTCUSDT,ETHUSDT,SOLUSDT
 ```
 
+Research diagnostics can replay the same frozen rules with adverse execution
+assumptions and an RVOL-first *paper comparator*:
+
+```
+python -m scalp_sentinel.swing_backtest --start 2025-11-01T00:00:00Z --end 2026-11-01T00:00:00Z --symbols BTCUSDT,ETHUSDT,SOLUSDT --diagnostics --stress --compare-ranking
+```
+
+Each JSON log entry has a `kind`: `swing_replay_summary` (including coverage and
+per-period aggregate), `swing_trade` (selected fill/cost/MFE/MAE),
+`swing_candidate` (every eligible candidate and rejection reason), or
+`swing_counterfactual` (an independently tracked rejected candidate). The
+counterfactuals may overlap selected positions and **cannot** be added to the
+portfolio return. `--stress` adds 10-minute/7.5 bp and 15-minute/7.5 bp
+decision scenarios with higher fee/slippage assumptions. `--compare-ranking`
+changes candidate order only in historical paper replay; the live paper worker
+continues to rank by liquidity/spread. Detailed `replay()` results also retain
+symbol/side summaries. Coverage counts show how many 4h decisions had sufficient
+closed history; current `exchangeInfo` cannot include delisted historical
+contracts, so the replay does not claim a complete point-in-time universe.
+The previous holdout has already been inspected and must not be reused to
+select a new rule. No diagnostic automatically promotes swing notifications.
+
 The first two-thirds is a development window and the last third is a holdout;
 a five-day embargo excludes positions crossing that boundary. Replayed
 decisions assume a five-minute delay, a fixed 5 bp historical spread, and a
