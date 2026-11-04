@@ -55,6 +55,60 @@ the existing mean per resolved trade. Active and data-gap outcomes are
 excluded from the decided denominator. New eligible-candle-age and tick
 duration logs make expiry and throughput measurable in production.
 
+## Independent paper swing hypothesis
+
+`python -m scalp_sentinel.swing_main` is a separate, paper-only process. It
+has no order or Telegram path and does not change V2.1 trade notifications.
+Run it as a separate Railway cron service at `5 */4 * * *` (UTC), with
+`DATABASE_URL` pointed at the existing PostgreSQL service and pre-deploy
+command `python -m scalp_sentinel.swing_verify`. It requires no trading key or
+Telegram credentials. The worker refuses decisions outside 5–20 minutes after
+a completed 4h bar; an interrupted cron does not replay a stale setup.
+
+`SWING_SYMBOLS` defaults to the configured watchlist, but the swing service
+only considers ordinary USD-M crypto perpetuals. TradFi perpetuals and pairs
+with under 400 complete daily candles are excluded at this stage. The swing
+client uses closed 1d/4h/1h candles, with the last complete UTC day's quote
+volume for reproducible liquidity checks. Delayed OI never gates this price
+and volume baseline. BTC daily trend is a mandatory market-context gate for
+both directions, even when BTC is absent from `SWING_SYMBOLS`.
+
+The frozen v1 hypothesis is a daily EMA50/200 aligned trend, a 4h pullback
+near EMA20 and reclaim, a same-boundary 1h close confirmation, 4h relative
+volume, unobstructed 1.5R path, and liquidity/spread/risk gates. All gates
+are required; no score threshold is tuned to force a weekly alert quota.
+At most one candidate is paper-recorded in a rolling 24h period; at most two
+positions are pending/open, with a side-adjusted 4h return-correlation veto.
+A seven-day same-symbol/side cooldown suppresses repeated setups. These caps
+control alert volume and hypothetical portfolio exposure, not expected return.
+
+The paper reference entry expires after two hours; 50% is modeled at 1.5R,
+50% at 3R, and the remaining stop moves to entry after TP1. Maximum hold is
+five days. Actual closed 1m bars, ambiguous intrabar order, gap exits, fee,
+slippage and historical funding use the existing paper tracker. Suggested
+0.5% per position and 1% aggregate account-risk figures are *references* in
+the journal: no account balance, leverage, liquidation price or actual order
+is available, so the scanner does not present these as enforced account risk.
+Assessments and rejection reasons are stored separately from scalp decisions.
+The scalp worker accepts an optional `CONTEXT_CHAT_ID` for its confluence and
+zone digests. Trade Telegram alerts continue to use `TELEGRAM_CHAT_ID`; with
+no separate chat ID, the existing destination is retained.
+
+Historical replay can be run on at least 300 days of USD-M kline history:
+
+```
+python -m scalp_sentinel.swing_backtest --start 2025-01-01T00:00:00Z --end 2026-11-01T00:00:00Z --symbols BTCUSDT,ETHUSDT,SOLUSDT
+```
+
+The first two-thirds is a development window and the last third is a holdout;
+a five-day embargo excludes positions crossing that boundary. Replayed
+decisions assume a five-minute delay, a fixed 5 bp historical spread, and a
+later 1m open as an executable quote proxy; historical books/real fills and
+liquidation are unavailable. Backtest and live paper outcomes are not
+interchangeable. No strategy is promoted automatically; assess net R per
+decided alert, missing data and drawdown before considering a separate swing
+Telegram channel.
+
 ## Run and deploy
 
 ```

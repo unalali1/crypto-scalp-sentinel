@@ -2,6 +2,7 @@ import copy
 import json
 import threading
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 from scalp_sentinel.main import Runner
@@ -72,6 +73,16 @@ class Delivery(unittest.TestCase):
         self.assertIn('BTCUSDT',send.call_args_list[0].args[2])
         self.assertIn('ETHUSDT',send.call_args_list[1].args[2])
         self.assertFalse(r.journal.memory_trades)
+
+    def test_context_destination_is_separate_from_trade_destination(self):
+        r=Runner.__new__(Runner)
+        r.cfg=replace(config(dry_run=False),context_chat_id='context-room')
+        r.journal=Journal()
+        alert=dict(alert_id='BTC:pivot',symbol='BTCUSDT',side='LONG',
+                   timeframe='5m',indicators=['RSI'],zone_low=99,zone_high=101,pivot_ts=1)
+        with patch('scalp_sentinel.main.send_telegram') as send:
+            self.assertEqual(r.deliver_confluences([alert],900000),1)
+        self.assertEqual(send.call_args.args[1],'context-room')
 
     def test_eligible_signal_is_delivered_before_slow_other_symbol(self):
         client=FakeClient()

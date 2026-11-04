@@ -295,7 +295,7 @@ class Runner:
         for start in range(0,len(claimed),15):
             group=claimed[start:start+15]
             try:
-                send_telegram(self.cfg.telegram_token,self.cfg.telegram_chat_id,
+                send_telegram(self.cfg.telegram_token,self.cfg.context_chat_id or self.cfg.telegram_chat_id,
                               format_confluence_digest(group,self.cfg.timezone))
             except Exception as exc:
                 for alert in group:
@@ -331,7 +331,7 @@ class Runner:
             claimed.append(alert)
         if claimed:
             try:
-                send_telegram(self.cfg.telegram_token,self.cfg.telegram_chat_id,
+                send_telegram(self.cfg.telegram_token,self.cfg.context_chat_id or self.cfg.telegram_chat_id,
                               format_price_zone_digest(claimed,self.cfg.timezone,"Strong zones"))
             except Exception as exc:
                 for alert in claimed:
@@ -361,7 +361,7 @@ class Runner:
                     log.info("DRY_RUN price_zone_digest zones=%d",len(eligible))
                 else:
                     try:
-                        send_telegram(self.cfg.telegram_token,self.cfg.telegram_chat_id,
+                        send_telegram(self.cfg.telegram_token,self.cfg.context_chat_id or self.cfg.telegram_chat_id,
                                       format_price_zone_digest(eligible,self.cfg.timezone))
                     except Exception as exc:
                         for alert in eligible:
