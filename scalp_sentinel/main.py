@@ -195,6 +195,7 @@ class Runner:
                     detail=str(exc).replace("\\n"," ")[:160]
                     log.warning('snapshot_failed symbol=%s stage=%s kind=%s detail=%s',
                                 sym,stage,type(exc).__name__,detail or 'no_detail')
+        signal_ms=int((time.monotonic()-tick_started)*1000)
         if full:
             self.watch={sym for sym,signals in candidates.items()
                         if any(s.checks['15m trend'] and s.checks['5m structure'] for s in signals)}
@@ -210,12 +211,14 @@ class Runner:
                     self.watch.discard(sym)
         if pending_v3:
             log.info("shadow_data_pending dataset=btc_context candidates=%d",len(pending_v3))
+        archive_started=time.monotonic()
         for sym,signals in candidates.items():
             snap=self.snapshots[sym]
             self.journal.archive(sym,snap,now_ms,signals+research_by_symbol[sym])
         # Archive BTC even if it is excluded from the user watchlist.
         if btc and 'BTCUSDT' not in candidates:
             self.journal.archive('BTCUSDT',btc,now_ms,[])
+        archive_ms=int((time.monotonic()-archive_started)*1000)
         attempted=len(jobs)
         if errors:
             log.warning("scan_degraded failed=%d attempted=%d",len(errors),attempted)
@@ -224,6 +227,7 @@ class Runner:
         # Context is sampled once per 15m and never holds up candidate delivery.
         context_bucket=now_ms//900000
         context_due=full and context_bucket!=self.last_context_bucket
+        context_started=time.monotonic()
         if context_due:
             self.last_context_bucket=context_bucket
             for sym in candidates:
@@ -243,13 +247,18 @@ class Runner:
                             level_alerts.append(alert)
                 except Exception as exc:
                     log.warning("price_zone_eval_failed symbol=%s kind=%s",sym,type(exc).__name__)
+        context_ms=int((time.monotonic()-context_started)*1000)
+        context_delivery_started=time.monotonic()
         confluence_sent=self.deliver_confluences(confluence_alerts,now_ms)
         level_sent=self.deliver_price_zones(level_alerts,now_ms)
+        context_delivery_ms=int((time.monotonic()-context_delivery_started)*1000)
         log.info('scan_finished mode=%s full=%s scanned=%d watching=%d eligible=%d delivered=%d confluence=%d level_zones=%d shadow_v3=%d shadow_15m_confirm=%d confirm_candidates=%d/%d failed=%d pending=%d',
                  cfg.primary_strategy,full,len(candidates),len(self.watch),primary_eligible,sent,confluence_sent,level_sent,
                  shadow_count,shadow_15m_count,shadow_15m_confirmed,shadow_15m_base,len(errors),len(pending))
         log.info("scan_duration_ms=%d context_due=%s",
                  int((time.monotonic()-tick_started)*1000),context_due)
+        log.info("scan_stages_ms signal=%d archive=%d context=%d context_delivery=%d",
+                 signal_ms,archive_ms,context_ms,context_delivery_ms)
         log.info("signal_diagnostics symbols=%d side_evaluations=%d prefilter_rejections=%s gates_passed=%s gates_failed=%s data_pending=%s",
                  len(candidates),evaluated_sides,
                  json.dumps(prefilter_counts,sort_keys=True,separators=(",",":")),

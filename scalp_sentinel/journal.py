@@ -139,23 +139,27 @@ class Journal:
                 state["armed"]=True
             state.update({"low":zone["low"],"high":zone["high"],"atr1h":zone["atr1h"],"updated_ms":now_ms})
             self.memory_price_zone_state[key]=state
-        if self.conn is None:
+        if self.conn is None or not zones:
             return
-        for zone in zones:
-            key=zone["zone_id"]
-            self.conn.execute("""INSERT INTO scalp_price_zone_state
-                (symbol,zone_key,zone_low,zone_high,atr1h,updated_ms)
-                VALUES (%s,%s,%s,%s,%s,%s)
-                ON CONFLICT(symbol,zone_key) DO UPDATE SET
+        # One round trip per symbol instead of an UPSERT and SELECT per zone.
+        # A disarmed zone rearms only after price has moved beyond half its
+        # current ATR, preserving the previous alert suppression rule.
+        rows={z["zone_id"]:{"zone_key":z["zone_id"],"zone_low":z["low"],
+              "zone_high":z["high"],"atr1h":z["atr1h"]} for z in zones}
+        self.conn.execute("""INSERT INTO scalp_price_zone_state
+            (symbol,zone_key,zone_low,zone_high,atr1h,updated_ms)
+            SELECT %s,z.zone_key,z.zone_low,z.zone_high,z.atr1h,%s
+            FROM jsonb_to_recordset(%s::jsonb) AS z(
+                zone_key TEXT,zone_low DOUBLE PRECISION,
+                zone_high DOUBLE PRECISION,atr1h DOUBLE PRECISION)
+            WHERE TRUE
+            ON CONFLICT(symbol,zone_key) DO UPDATE SET
                 zone_low=excluded.zone_low,zone_high=excluded.zone_high,
-                atr1h=excluded.atr1h,updated_ms=excluded.updated_ms""",
-                (symbol,key,zone["low"],zone["high"],zone["atr1h"],now_ms))
-            row=self.conn.execute("""SELECT armed,atr1h,zone_low,zone_high
-                FROM scalp_price_zone_state WHERE symbol=%s AND zone_key=%s""",
-                (symbol,key)).fetchone()
-            if row and not row[0] and max(0.0,zone["low"]-price,price-zone["high"]) > 0.5*max(float(row[1]),zone["atr1h"]):
-                self.conn.execute("""UPDATE scalp_price_zone_state SET armed=TRUE
-                    WHERE symbol=%s AND zone_key=%s""",(symbol,key))
+                atr1h=excluded.atr1h,updated_ms=excluded.updated_ms,
+                armed=scalp_price_zone_state.armed OR
+                    GREATEST(0.0,excluded.zone_low-%s,%s-excluded.zone_high)
+                    > 0.5*excluded.atr1h""",
+            (symbol,now_ms,json.dumps(list(rows.values())),price,price))
         self.conn.commit()
 
     def claim_price_zone(self,alert,now_ms):
