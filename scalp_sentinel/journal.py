@@ -338,6 +338,30 @@ class Journal:
         self.conn.commit()
         return row is not None
 
+    def add_swing_counterfactual(self, signal, now_ms, selection_reason):
+        """Track an unselected executable setup without consuming swing limits."""
+        cohort="swing-candidate-shadow"
+        key=(cohort,signal.setup_id)
+        trade=paper_trade(signal,now_ms)
+        trade.update(cohort=cohort,strategy_version=signal.strategy_version)
+        trade["journal_json"]["selection_reason"]=selection_reason
+        if self.conn is None:
+            if key in self.memory_setups or ("swing-shadow",signal.setup_id) in self.memory_setups:
+                return False
+            self.memory_setups.add(key)
+            self.memory_trades.append(trade)
+            return True
+        row=self.conn.execute("""INSERT INTO scalp_shadow_outcomes
+            (cohort,setup_id,trade,status,sent_at_ms)
+            SELECT %s,%s,%s::jsonb,%s,%s
+            WHERE NOT EXISTS (SELECT 1 FROM scalp_shadow_outcomes
+                              WHERE cohort='swing-shadow' AND setup_id=%s)
+            ON CONFLICT DO NOTHING RETURNING setup_id""",
+            (cohort,signal.setup_id,json.dumps(trade),trade["status"],now_ms,
+             signal.setup_id)).fetchone()
+        self.conn.commit()
+        return row is not None
+
     def swing_recent_count(self, now_ms):
         """Rolling 24h paper swing count, across all symbols."""
         cutoff=now_ms-24*3600000
