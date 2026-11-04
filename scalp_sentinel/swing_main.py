@@ -106,6 +106,19 @@ class SwingRunner:
             if reason:
                 self.journal.swing_assessment(s,now_ms,reason)
                 log.info("swing_rejected symbol=%s side=%s reason=%s",s.symbol,s.side,reason)
+                if reason in ("daily_cap","portfolio_cap","correlation_or_unknown_exposure","cooldown"):
+                    try:
+                        book=self.client.get("/fapi/v1/ticker/bookTicker",symbol=s.symbol)
+                        observed=int(time.time()*1000)
+                        executable=prepare_swing(s,book,observed)
+                        if executable is None and self.journal.add_swing_counterfactual(s,observed,reason):
+                            log.info("swing_counterfactual_recorded symbol=%s side=%s reason=%s",
+                                     s.symbol,s.side,reason)
+                    except Exception as exc:
+                        # Diagnostics cannot prevent another eligible setup
+                        # from being considered by the selected paper book.
+                        log.warning("swing_counterfactual_pending symbol=%s kind=%s",
+                                    s.symbol,type(exc).__name__)
                 continue
             decision=int(time.time()*1000)
             if not self.journal.add_swing_shadow(s,decision):

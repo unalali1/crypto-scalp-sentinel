@@ -103,6 +103,29 @@ class Swing(unittest.TestCase):
         self.assertEqual(journal.memory_trades[0]["cohort"],"swing-shadow")
         self.assertEqual(journal.memory_trades[0]["strategy_version"],"swing-trend-v1")
 
+    def test_unselected_candidate_is_independent_and_idempotent(self):
+        t,snap=bullish_snapshot()
+        now=t+5*60000
+        class Client:
+            def get(self,path,**_kw):
+                return {"serverTime":now} if path.endswith("/time") else dict(snap["book"])
+
+            def symbol_info(self):
+                return {s:{"contractType":"PERPETUAL","filters":[{"filterType":"PRICE_FILTER","tickSize":"0.01"}]}
+                        for s in ("BTCUSDT","ETHUSDT","SOLUSDT")}
+
+        journal=Journal()
+        runner=SwingRunner(Client(),journal,("ETHUSDT","SOLUSDT"))
+        with patch("scalp_sentinel.swing_main.live_snapshot",return_value=snap),\
+             patch("scalp_sentinel.swing_main.time.time",return_value=now/1000):
+            self.assertEqual(runner.run(now),1)
+            self.assertEqual(runner.run(now),0)
+        self.assertEqual([(p["cohort"],p["symbol"]) for p in journal.memory_trades],
+                         [("swing-shadow","ETHUSDT"),("swing-candidate-shadow","SOLUSDT")])
+        self.assertEqual(journal.memory_trades[1]["journal_json"]["selection_reason"],"daily_cap")
+        self.assertEqual(len(journal.active("swing-shadow")),1)
+        self.assertEqual(journal.swing_recent_count(now),1)
+
     def test_fetch_history_rejects_gap_across_pages(self):
         class Client:
             def get(self,_path,**kwargs):
