@@ -222,7 +222,8 @@ closed for v2.1 because its CVD/OI gate depends on that series.
 ## Execution funnel diagnostics
 
 `python -m scalp_sentinel.report` now includes `last_30d_execution_funnel`:
-per-cohort delivery decision reasons, sent/reference-filled/decided outcomes,
+per-cohort delivery decision reasons (including a separate last-24-hour count),
+sent/reference-filled/decided outcomes,
 mean net R per decided alert, and median delivery spread, quote age and
 closed-candle age where recorded. An unresolved outcome or missing funding
 costs is excluded from decided return; NO_ENTRY and INVALIDATED count as zero.
@@ -230,7 +231,9 @@ The assessment and decision denominators reflect their retention window and
 are not a historical lifetime total. A new batch-written candidate-arrival
 record counts scans with multiple primary candidates and how often the first
 candidate ranked below another on score/RVOL. It does not establish that the
-later candidate could have filled or earned more. Recording happens after
+later candidate could have filled or earned more. For future primary decisions, logs also split snapshot age, evaluation-to-delivery,
+quote fetch and quote age to diagnose stale triggers without relaxing the gate.
+Recording happens after
 time-sensitive delivery; the primary rule and Telegram routing do not change.
 New quote metrics only appear on newly recorded signals.
 
