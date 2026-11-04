@@ -78,6 +78,12 @@ class Journal:
                 side TEXT NOT NULL, checks JSONB NOT NULL, eligible BOOLEAN NOT NULL,
                 reason TEXT, PRIMARY KEY(symbol,observed_ms,version,side))""")
             conn.execute("CREATE INDEX IF NOT EXISTS scalp_assessment_time ON scalp_assessments(observed_ms)")
+            conn.execute("""CREATE TABLE IF NOT EXISTS scalp_swing_assessments (
+                symbol TEXT NOT NULL, bar_close_ms BIGINT NOT NULL,
+                side TEXT NOT NULL, evaluated_ms BIGINT NOT NULL,
+                setup_id TEXT NOT NULL, checks JSONB NOT NULL,
+                decision TEXT NOT NULL, details JSONB NOT NULL,
+                PRIMARY KEY(symbol,bar_close_ms,side))""")
             conn.execute("""CREATE TABLE IF NOT EXISTS scalp_decisions (
                 symbol TEXT NOT NULL, observed_ms BIGINT NOT NULL, cohort TEXT NOT NULL,
                 side TEXT NOT NULL, reason TEXT NOT NULL,
@@ -309,6 +315,55 @@ class Journal:
         self.conn.execute("""INSERT INTO scalp_shadow_outcomes
             (cohort,setup_id,trade,status,sent_at_ms) VALUES (%s,%s,%s::jsonb,%s,%s)
             ON CONFLICT DO NOTHING""",(cohort,signal.setup_id,json.dumps(t),t["status"],now_ms))
+        self.conn.commit()
+
+    def add_swing_shadow(self, signal, now_ms):
+        """Atomically deduplicate and persist a paper swing; never sends alerts."""
+        cohort="swing-shadow"
+        key=(cohort,signal.setup_id)
+        if self.conn is None:
+            if key in self.memory_setups:
+                return False
+            self.memory_setups.add(key)
+            trade=paper_trade(signal,now_ms)
+            trade.update(cohort=cohort,strategy_version=cohort)
+            self.memory_trades.append(trade)
+            return True
+        trade=paper_trade(signal,now_ms)
+        trade.update(cohort=cohort,strategy_version=cohort)
+        row=self.conn.execute("""INSERT INTO scalp_shadow_outcomes
+            (cohort,setup_id,trade,status,sent_at_ms) VALUES (%s,%s,%s::jsonb,%s,%s)
+            ON CONFLICT DO NOTHING RETURNING setup_id""",
+            (cohort,signal.setup_id,json.dumps(trade),trade["status"],now_ms)).fetchone()
+        self.conn.commit()
+        return row is not None
+
+    def swing_recent_count(self, now_ms):
+        """Rolling 24h paper swing count, across all symbols."""
+        cutoff=now_ms-24*3600000
+        if self.conn is None:
+            return sum(t.get("cohort")=="swing-shadow" and t["sent_at_ms"]>cutoff
+                       for t in self.memory_trades)
+        count=self.conn.execute("""SELECT count(*) FROM scalp_shadow_outcomes
+            WHERE cohort='swing-shadow' AND sent_at_ms>%s""",(cutoff,)).fetchone()[0]
+        self.conn.commit()
+        return int(count)
+
+    def swing_assessment(self, signal, now_ms, decision):
+        if self.conn is None:
+            return
+        details=dict(entry=signal.entry,stop=signal.stop,tp1=signal.tp1,
+                     tp2=signal.tp2,atr4=signal.atr4,rvol4=signal.rvol4,
+                     spread_bps=signal.spread_bps,quote_volume=signal.quote_volume)
+        self.conn.execute("""INSERT INTO scalp_swing_assessments
+            (symbol,bar_close_ms,side,evaluated_ms,setup_id,checks,decision,details)
+            VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s::jsonb)
+            ON CONFLICT(symbol,bar_close_ms,side) DO UPDATE SET
+                evaluated_ms=excluded.evaluated_ms,checks=excluded.checks,
+                decision=excluded.decision,
+                details=excluded.details""",
+            (signal.symbol,signal.snapshot_ts+4*3600000,signal.side,now_ms,
+             signal.setup_id,json.dumps(signal.checks),decision,json.dumps(details)))
         self.conn.commit()
 
     def archive(self,symbol,snapshot,now_ms,assessments):

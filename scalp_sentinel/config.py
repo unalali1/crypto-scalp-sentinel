@@ -42,6 +42,7 @@ class Config:
     breakout_rvol: float = 1.15
     min_delta_ratio: float = 0.05
     min_efficiency: float = 0.25
+    context_chat_id: str = ""
 
     def validate(self):
         if self.primary_strategy not in ("v2.1", "v3"):
@@ -97,5 +98,6 @@ class Config:
             breakout_rvol=float(os.getenv("BREAKOUT_RVOL", 1.15)),
             min_delta_ratio=float(os.getenv("MIN_DELTA_RATIO", .05)),
             min_efficiency=float(os.getenv("MIN_EFFICIENCY", .25)),
+            context_chat_id=os.getenv("CONTEXT_CHAT_ID", "").strip(),
         )
 
