@@ -38,6 +38,8 @@ def prepare(signal, book, now_ms, cfg):
         max_hold_ms=cfg.max_hold_minutes*60000,invalidate_target_before_entry=True,
         fee_bps=cfg.fee_bps,slippage_bps=cfg.slippage_bps,tp1_fraction=.5,
         quote_at_decision=quote,decision_ms=now_ms,setup_id=getattr(signal,"setup_id",""),
+        spread_bps=spread,quote_age_ms=now_ms-int(book['time']),
+        candle_age_ms=now_ms-(signal.snapshot_ts+60000),
         expires_at_ms=now_ms+cfg.entry_window_minutes*60000,
         price_min=signal.entry-cfg.max_entry_drift_atr*signal.atr5,
         price_max=signal.entry+cfg.max_entry_drift_atr*signal.atr5,
