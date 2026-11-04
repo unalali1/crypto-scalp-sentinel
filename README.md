@@ -121,6 +121,12 @@ closed history; current `exchangeInfo` cannot include delisted historical
 contracts, so the replay does not claim a complete point-in-time universe.
 The previous holdout has already been inspected and must not be reused to
 select a new rule. No diagnostic automatically promotes swing notifications.
+For future untouched observations, the paper worker also stores an executable
+candidate rejected by portfolio selection in the isolated
+`swing-candidate-shadow` cohort. The existing shadow tracker resolves it with
+the same closed 1m bars and funding accounting. Candidate shadows never count
+toward the one-per-day selected paper cap, active exposure or Telegram alerts;
+the original selection and rejection reason remain in `scalp_swing_assessments`.
 
 The first two-thirds is a development window and the last third is a holdout;
 a five-day embargo excludes positions crossing that boundary. Replayed
