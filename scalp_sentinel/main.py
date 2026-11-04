@@ -80,6 +80,7 @@ class Runner:
         prefilter_counts={}
         evaluated_sides=0
         primary_eligible=sent=shadow_count=shadow_15m_count=0
+        primary_arrivals=[]
         shadow_15m_base=shadow_15m_confirmed=0
         pending_v3=[]
         btc=None
@@ -100,6 +101,7 @@ class Runner:
             research_by_symbol[sym].append(v3)
             if v3.eligible:
                 if cfg.primary_strategy=='v3':
+                    primary_arrivals.append((sym,side,v3.score,v3.rvol,int(time.time()*1000)))
                     primary_eligible+=1
                     sent+=self.deliver([v3],'primary',now_ms)
                 elif cfg.shadow_enabled:
@@ -154,6 +156,7 @@ class Runner:
                                          sym,s.side,int(time.time()*1000)-(s.snapshot_ts+60000))
                                 stage="signal_delivery"
                                 if cfg.primary_strategy=='v2.1':
+                                    primary_arrivals.append((sym,s.side,s.score,s.rvol,completed_ms))
                                     primary_eligible+=1
                                     sent+=self.deliver([s],'primary',now_ms)
                                 if cfg.shadow_enabled and cfg.primary_strategy=='v2.1':
@@ -196,6 +199,8 @@ class Runner:
                     log.warning('snapshot_failed symbol=%s stage=%s kind=%s detail=%s',
                                 sym,stage,type(exc).__name__,detail or 'no_detail')
         signal_ms=int((time.monotonic()-tick_started)*1000)
+        # Persist arrival order after time-sensitive notification decisions.
+        self.journal.record_arrivals(cfg.primary_strategy,now_ms,primary_arrivals)
         if full:
             self.watch={sym for sym,signals in candidates.items()
                         if any(s.checks['15m trend'] and s.checks['5m structure'] for s in signals)}

@@ -89,6 +89,12 @@ class Journal:
                 side TEXT NOT NULL, reason TEXT NOT NULL,
                 PRIMARY KEY(symbol,observed_ms,cohort,side))""")
             conn.execute("CREATE INDEX IF NOT EXISTS scalp_decision_time ON scalp_decisions(observed_ms)")
+            conn.execute("""CREATE TABLE IF NOT EXISTS scalp_candidate_arrivals (
+                cohort TEXT NOT NULL, observed_ms BIGINT NOT NULL,
+                completed_ms BIGINT NOT NULL, symbol TEXT NOT NULL, side TEXT NOT NULL,
+                score INTEGER NOT NULL, rvol DOUBLE PRECISION NOT NULL,
+                PRIMARY KEY(cohort,observed_ms,symbol,side))""")
+            conn.execute("CREATE INDEX IF NOT EXISTS scalp_arrival_time ON scalp_candidate_arrivals(observed_ms)")
             conn.execute("""CREATE TABLE IF NOT EXISTS scalp_confluence_alerts (
                 alert_id TEXT PRIMARY KEY, symbol TEXT NOT NULL, side TEXT NOT NULL,
                 timeframe TEXT NOT NULL, pivot_ts BIGINT NOT NULL,
@@ -108,6 +114,19 @@ class Journal:
                 armed BOOLEAN NOT NULL DEFAULT TRUE, last_alert_ms BIGINT,
                 updated_ms BIGINT NOT NULL, PRIMARY KEY(symbol,zone_key))""")
             conn.commit()
+
+    def record_arrivals(self,cohort,observed_ms,arrivals):
+        if self.conn is None or not arrivals:
+            return
+        rows=[dict(symbol=sym,side=side,score=score,rvol=rvol,completed_ms=completed)
+              for sym,side,score,rvol,completed in arrivals]
+        self.conn.execute("""INSERT INTO scalp_candidate_arrivals
+            (cohort,observed_ms,completed_ms,symbol,side,score,rvol)
+            SELECT %s,%s,r.completed_ms,r.symbol,r.side,r.score,r.rvol
+            FROM jsonb_to_recordset(%s::jsonb) AS r(
+                symbol TEXT,side TEXT,score INTEGER,rvol DOUBLE PRECISION,completed_ms BIGINT)
+            ON CONFLICT DO NOTHING""",(cohort,observed_ms,json.dumps(rows)))
+        self.conn.commit()
 
     def decision(self,signal,cohort,now_ms,reason):
         log.info('signal_decision cohort=%s symbol=%s side=%s reason=%s',cohort,signal.symbol,signal.side,reason)
@@ -441,7 +460,7 @@ class Journal:
             return
         cutoff=now_ms-days*86400000
         # Bounded deletions avoid long transactions after downtime.
-        for table in ("scalp_replay_frames","scalp_assessments","scalp_decisions"):
+        for table in ("scalp_replay_frames","scalp_assessments","scalp_decisions","scalp_candidate_arrivals"):
             self.conn.execute(f"DELETE FROM {table} WHERE ctid IN (SELECT ctid FROM {table} WHERE observed_ms<%s LIMIT 10000)",(cutoff,))
         self.conn.execute("DELETE FROM scalp_setup_claims WHERE claimed_ms<%s AND (delivery='sent' OR cohort<>'primary')",(cutoff,))
         self.conn.execute("DELETE FROM scalp_confluence_alerts WHERE ctid IN (SELECT ctid FROM scalp_confluence_alerts WHERE detected_ms<%s LIMIT 10000)",(cutoff,))
