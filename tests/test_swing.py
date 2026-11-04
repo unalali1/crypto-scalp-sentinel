@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from scalp_sentinel.binance_client import BinanceError
 from scalp_sentinel.journal import Journal, paper_trade
-from scalp_sentinel.swing_backtest import asof, fetch_bars
+from scalp_sentinel.swing_backtest import asof, console_report, fetch_bars
 from scalp_sentinel.swing_engine import DAY, FOUR_HOURS, HOUR, daily_direction, evaluate_swing
 from scalp_sentinel.swing_execution import MAX_HOLD_MS, prepare_swing
 from scalp_sentinel.swing_main import SwingRunner
@@ -112,6 +112,19 @@ class Swing(unittest.TestCase):
                 return [bar(1001*HOUR,100,101,99,100,1,HOUR)]
         with self.assertRaisesRegex(ValueError,"page gap"):
             fetch_bars(Client(),"BTCUSDT","1h",HOUR,0,1002*HOUR)
+
+    def test_console_report_preserves_holdout_aggregate(self):
+        base={key:None for key in ("strategy","start_ms","end_ms","fetched_symbols",
+              "skipped_symbols","development_end_ms","holdout_start_ms",
+              "statuses","data_gaps","rejected","assumptions")}
+        base["development"]=[{"symbol":"BTCUSDT","side":"LONG","signals":1},
+                             {"symbol":"ALL","side":"ALL","signals":2}]
+        base["holdout"]=[{"symbol":"ALL","side":"ALL","signals":3},
+                         {"symbol":"ETHUSDT","side":"SHORT","signals":2}]
+        report=console_report(base)
+        self.assertEqual(report["development"]["signals"],2)
+        self.assertEqual(report["holdout"]["signals"],3)
+        self.assertEqual(len(report),len(base))
 
 
 if __name__=="__main__":
