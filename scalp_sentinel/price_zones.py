@@ -269,8 +269,8 @@ def format_price_zone_alert(alert, tz):
     ])
 
 
-def format_price_zone_digest(alerts, tz):
-    lines = ["🧭 PRICE CONFLUENCE DIGEST | Fib levels", ""]
+def format_price_zone_digest(alerts, tz, title="Fib levels"):
+    lines = [f"🧭 PRICE CONFLUENCE DIGEST | {title}", ""]
     for alert in sorted(alerts, key=lambda item: (item["symbol"], item["distance"])):
         low, high = alert["low"], alert["high"]
         band = f"{low:,.8g}" if low == high else f"{low:,.8g} – {high:,.8g}"

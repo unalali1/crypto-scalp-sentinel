@@ -188,3 +188,17 @@ def format_confluence_alert(alert,tz):
         "Bu bir işlem sinyali değildir; giriş, stop ve hedef içermez.",
         "Yönsel değerlendirme için konfluens alanını izleyin; tek başına işlem gerekçesi saymayın.",
     ])
+
+
+def format_confluence_digest(alerts,tz):
+    """One compact message for a bounded group of context observations."""
+    lines=["🧭 YÖNSEL KONFLUENS ÖZETİ", ""]
+    for alert in sorted(alerts,key=lambda item:(item["symbol"],item["timeframe"],item["side"])):
+        side="LONG" if alert["side"]=="LONG" else "SHORT"
+        lines.append(
+            f"{alert['symbol']} · {side} · {alert['timeframe']} · "
+            f"{alert['zone_low']:,.8g}–{alert['zone_high']:,.8g} · "
+            f"{', '.join(alert['indicators'])}"
+        )
+    lines.extend(["", "Bu bir işlem sinyali değildir; giriş, stop ve hedef içermez."])
+    return "\n".join(lines)

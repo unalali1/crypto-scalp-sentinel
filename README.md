@@ -30,6 +30,31 @@ are unvalidated hypotheses.
    assumptions, actual historical funding, MFE/MAE, drawdown and loss streaks.
    Archive decision frames for chronological replay and persist reject reasons.
 
+## 2026-11-04 latency and selectivity update
+
+The production V2.1 rules and the 90-second stale-trigger gate are unchanged.
+An eligible candidate is now delivered as soon as its symbol's snapshot is
+evaluated, instead of waiting for every other symbol, replay archive writes,
+and context alerts. This favors a valid timely alert when other market-data
+requests are slow. When several symbols qualify at once, the first completed
+snapshot can consume a rolling alert slot before a later, stronger candidate;
+the old global score sort could not be preserved without waiting. The delivery
+quote is still checked at real wall-clock time.
+
+Context-only confluence and price-zone detection runs after signal delivery on
+one full scan per 15-minute bucket. Confluences and strong price zones are sent
+as bounded digests; standalone Fibonacci levels keep their own digest. Context
+sampling is less frequent, so a zone touched only between samples may not be
+reported. It never creates a trade outcome.
+
+V2.1 volume-required and trend-regime variants now run as separate paper-only
+cohorts alongside the existing 15m-close confirmation and V3 cohorts. No
+variant is promoted by its filter passing. The report adds no-entry counts
+and mean net R per decided alert (zero for NO_ENTRY/INVALIDATED), alongside
+the existing mean per resolved trade. Active and data-gap outcomes are
+excluded from the decided denominator. New eligible-candle-age and tick
+duration logs make expiry and throughput measurable in production.
+
 ## Run and deploy
 
 ```
@@ -76,6 +101,9 @@ minimum 180m long / 240m short cooldown. New setup identity is required even
 when cooldown expires. An active signal blocks another signal in that symbol,
 including an opposing direction. V3's additional filters initially run only in
 shadow; the primary engine does not claim their benefit before comparison.
+The volume and trend cohorts are also shadow-only. The 15m sampling cohort
+still depends on the worker observing the exact quarter-hour start; compare
+its coverage before drawing timing conclusions.
 
 ## Scanner diagnostics
 
@@ -125,7 +153,7 @@ python -m scalp_sentinel.replay --version v3 --start 2026-11-01T00:00:00Z --end 
 
 The report is also logged hourly. It groups by version, symbol, side and regime,
 plus per-version totals. It includes entry counts, ambiguity counts, lower/upper
-mean net R, conservative profit factor, equal-risk sequence drawdown and longest
+mean net R per trade and per decided alert, conservative profit factor, equal-risk sequence drawdown and longest
 loss streak. This is not a leveraged portfolio equity curve. Shadow and primary
 cohorts enforce their own budgets and cooldowns.
 

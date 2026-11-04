@@ -78,6 +78,10 @@ def summarize(trades):
                         key=lambda t: (t.get("finished_at_ms", 0), t.get("sent_at_ms", 0)))
         low = [t["journal_json"]["net_r_low"] for t in closed]
         high = [t["journal_json"]["net_r_high"] for t in closed]
+        # A signal with no entry earns zero, while unresolved/data-gap signals
+        # must not be silently counted as either a win or a loss.
+        no_entry = [t for t in rows if t["status"] in ("NO_ENTRY", "INVALIDATED")]
+        decided = len(closed) + len(no_entry)
         equity = peak = dd = streak = max_streak = 0
         for r in low:
             equity += r
@@ -88,7 +92,10 @@ def summarize(trades):
         gains, losses = sum(max(0,x) for x in low), -sum(min(0,x) for x in low)
         result.append(dict(version=key[0], symbol=key[1], side=key[2], regime=key[3],
             signals=len(rows), filled=sum(t.get("filled_at_ms") is not None for t in rows),
-            resolved=len(low), ambiguous=sum("AMBIGUOUS" in t["status"] for t in rows),
+            resolved=len(low), no_entry=len(no_entry), decision_count=decided,
+            mean_net_r_per_alert_low=sum(low)/decided if decided else None,
+            mean_net_r_per_alert_high=sum(high)/decided if decided else None,
+            ambiguous=sum("AMBIGUOUS" in t["status"] for t in rows),
             mean_net_r_low=sum(low)/len(low) if low else None,
             mean_net_r_high=sum(high)/len(high) if high else None,
             profit_factor_low=gains/losses if losses else None,
