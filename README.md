@@ -219,6 +219,21 @@ specific strategy condition. Delayed 5m OI is isolated to the V3 shadow cohort;
 it no longer blocks a v2.1 primary snapshot. A stale 15m OI input still fails
 closed for v2.1 because its CVD/OI gate depends on that series.
 
+## Execution funnel diagnostics
+
+`python -m scalp_sentinel.report` now includes `last_30d_execution_funnel`:
+per-cohort delivery decision reasons, sent/reference-filled/decided outcomes,
+mean net R per decided alert, and median delivery spread, quote age and
+closed-candle age where recorded. An unresolved outcome or missing funding
+costs is excluded from decided return; NO_ENTRY and INVALIDATED count as zero.
+The assessment and decision denominators reflect their retention window and
+are not a historical lifetime total. A new batch-written candidate-arrival
+record counts scans with multiple primary candidates and how often the first
+candidate ranked below another on score/RVOL. It does not establish that the
+later candidate could have filled or earned more. Recording happens after
+time-sensitive delivery; the primary rule and Telegram routing do not change.
+New quote metrics only appear on newly recorded signals.
+
 ## Entry and outcome semantics
 
 The notification is a **paper limit-reference setup**, not a market order.
