@@ -128,6 +128,29 @@ the same closed 1m bars and funding accounting. Candidate shadows never count
 toward the one-per-day selected paper cap, active exposure or Telegram alerts;
 the original selection and rejection reason remain in `scalp_swing_assessments`.
 
+### Swing research status (2026-11-04)
+
+The 17-symbol 2025-11-01 to 2026-11-01 retrospective run produced the
+following equal-risk *paper* results. Figures are mean net R per decided
+alert, not account returns. The last third was a holdout with a five-day
+embargo; it had only 2–4 signals per scenario.
+
+| Frozen paper scenario | Development | Holdout |
+| --- | ---: | ---: |
+| Existing liquidity rank, 5m delay, 5 bp spread, 5/2 bp fee/slippage | 19; +0.209 R | 4; -0.535 R |
+| 10m delay, 7.5 bp spread, 5/4 bp fee/slippage | 19; +0.021 R | 3; -0.627 R |
+| 15m delay, 7.5 bp spread, 7/5 bp fee/slippage | 16; +0.319 R | 2; -0.963 R |
+| Exploratory RVOL-first rank, original execution assumptions | 18; -0.024 R | 4; -0.535 R |
+
+There were no historical 1m data gaps. The 15m result uses a different set of
+selected trades because 16 candidates failed the price-drift gate; its higher
+development mean is not evidence of improved execution. Under the existing
+rank, all development selections were shorts. There was no multi-candidate
+selection event in the holdout. The currently listed universe misses delisted
+historical contracts. Historical spreads, quote execution and liquidation are
+not observed. No ranking or exit rule was promoted; the swing service remains
+paper-only while new untouched candidate outcomes accrue.
+
 The first two-thirds is a development window and the last third is a holdout;
 a five-day embargo excludes positions crossing that boundary. Replayed
 decisions assume a five-minute delay, a fixed 5 bp historical spread, and a
