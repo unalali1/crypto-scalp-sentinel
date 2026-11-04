@@ -14,7 +14,7 @@ class DeliveryFunnel(unittest.TestCase):
                 dict(base,status='TP2_HIT',journal_json=dict(costs_complete=False,
                     net_r_low=2.0)),
                 dict(base,status='OPEN',journal_json={})]
-        result=delivery_funnel(trades,[('primary','sent'),('primary','spread')],
+        result=delivery_funnel(trades,[(29*86400000+100,'primary','sent'),(0,'primary','spread')],
             [('v2.1',True),('v2.1',False)],
             [(90,91,'BTC','LONG',5,2.0),(90,92,'ETH','LONG',7,1.2)],0)
         primary=result['cohorts']['primary']
@@ -22,6 +22,7 @@ class DeliveryFunnel(unittest.TestCase):
         self.assertEqual(primary['decided'],2)
         self.assertEqual(primary['filled'],3)
         self.assertEqual(primary['decisions'],{'sent':1,'spread':1})
+        self.assertEqual(result['last_24h_decisions'],{'primary':{'sent':1}})
         self.assertAlmostEqual(primary['mean_net_r_per_decided_alert_low'],-.6)
         self.assertEqual(primary['median_quote_age_ms'],100)
         self.assertEqual(result['eligible_by_version'],{'v2.1':1})

@@ -151,6 +151,7 @@ class Runner:
                             s.research=regime(snap)
                             s.research.update({k:snap.get(k) for k in ('flow_source','oi_age_ms','oi5_age_ms')})
                             s.research['snapshot_completed_ms']=completed_ms
+                            s.research['evaluation_completed_ms']=int(time.time()*1000)
                             if s.eligible:
                                 log.info("eligible_latency symbol=%s side=%s candle_age_ms=%d",
                                          sym,s.side,int(time.time()*1000)-(s.snapshot_ts+60000))
@@ -408,11 +409,22 @@ class Runner:
                 self.journal.decision(s,cohort,delivery_started_ms,'correlation')
                 continue
             # Fresh quote directly before each delivery; never reuse scan book.
+            quote_started=time.monotonic()
             book=self.client.get('/fapi/v1/ticker/bookTicker',symbol=s.symbol)
+            quote_fetch_ms=int((time.monotonic()-quote_started)*1000)
             decision=int(time.time()*1000)
             reason=prepare(s,book,decision,cfg)
             log.info("delivery_latency cohort=%s symbol=%s side=%s candle_age_ms=%d result=%s",
                      cohort,s.symbol,s.side,decision-(s.snapshot_ts+60000),reason or "ready")
+            if cohort=='primary':
+                research=getattr(s,'research',{}) or {}
+                log.info("primary_delivery_phases symbol=%s side=%s result=%s snapshot_age_ms=%s eval_to_delivery_ms=%s quote_fetch_ms=%d quote_age_ms=%s",
+                         s.symbol,s.side,reason or 'ready',
+                         (research['snapshot_completed_ms']-(s.snapshot_ts+60000)
+                          if research.get('snapshot_completed_ms') is not None else None),
+                         (decision-research['evaluation_completed_ms']
+                          if research.get('evaluation_completed_ms') is not None else None),
+                         quote_fetch_ms,decision-int(book['time']) if book.get('time') is not None else None)
             if reason:
                 self.journal.decision(s,cohort,decision,reason)
                 continue

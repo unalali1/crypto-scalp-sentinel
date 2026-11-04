@@ -20,8 +20,12 @@ def delivery_funnel(trades, decisions, assessments, arrivals, since_ms):
     cohorts=defaultdict(lambda: {"reasons":Counter(), "outcomes":Counter(),
         "sent":0,"filled":0,"decided":0,"net_r_low_sum":0.0,
         "net_r_high_sum":0.0,"spread_bps":[],"quote_age_ms":[],"candle_age_ms":[]})
-    for cohort,reason in decisions:
+    recent_reasons=defaultdict(Counter)
+    last_day_start=since_ms+29*86400000
+    for observed_ms,cohort,reason in decisions:
         cohorts[cohort]["reasons"][reason]+=1
+        if observed_ms>=last_day_start:
+            recent_reasons[cohort][reason]+=1
     for trade in trades:
         if trade["sent_at_ms"]<since_ms:
             continue
@@ -64,7 +68,9 @@ def delivery_funnel(trades, decisions, assessments, arrivals, since_ms):
         first=min(candidates,key=lambda c:(c[0],c[1],c[2]))
         best=max(candidates,key=lambda c:(c[3],c[4]))
         first_lower+=first[3]<best[3] or (first[3]==best[3] and first[4]<best[4])
-    return dict(window_start_ms=since_ms,cohorts=results,eligible_by_version=dict(eligible),
+    return dict(window_start_ms=since_ms,cohorts=results,
+        last_24h_decisions=dict((cohort,dict(counts)) for cohort,counts in sorted(recent_reasons.items())),
+        eligible_by_version=dict(eligible),
         arrival_order=dict(multi_candidate_scans=contested,first_below_best_rank=first_lower,
             note="Eligibility and score order only; does not prove a better fill or outcome."),
         note="Paper/reference fills, not exchange execution. Assessments and decisions expire with retention.")
@@ -77,7 +83,7 @@ def read_report(conn,now_ms=None):
     trades.extend(dict(row[1],cohort=row[0]) for row in
                   conn.execute("SELECT cohort,trade FROM scalp_shadow_outcomes").fetchall())
     since_ms=(int(time.time()*1000) if now_ms is None else now_ms)-30*86400000
-    decisions=conn.execute("SELECT cohort,reason FROM scalp_decisions WHERE observed_ms >= %s",
+    decisions=conn.execute("SELECT observed_ms,cohort,reason FROM scalp_decisions WHERE observed_ms >= %s",
                            (since_ms,)).fetchall()
     assessments=conn.execute("SELECT version,eligible FROM scalp_assessments WHERE observed_ms >= %s",
                              (since_ms,)).fetchall()
