@@ -55,6 +55,10 @@ the existing mean per resolved trade. Active and data-gap outcomes are
 excluded from the decided denominator. New eligible-candle-age and tick
 duration logs make expiry and throughput measurable in production.
 
+The frozen paper promotion rules and read-only cohort audit are in
+[docs/STRATEGY_PROMOTION.md](docs/STRATEGY_PROMOTION.md). No candidate is
+promoted without a matched null comparison and untouched validation.
+
 ## Independent paper swing hypothesis
 
 `python -m scalp_sentinel.swing_main` is a separate, paper-only process. It
