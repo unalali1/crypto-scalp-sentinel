@@ -14,12 +14,14 @@ def format_signal(signal, tz):
     entry, stop = signal.entry, signal.stop
     risk_pct = abs(entry - stop) / entry * 100
     title = "🟢 LONG" if signal.side == "LONG" else "🔴 SHORT"
-    dt = datetime.fromtimestamp(signal.snapshot_ts / 1000, tz=timezone.utc).astimezone(ZoneInfo(tz))
+    standard = getattr(signal, "timeframe_ms", 60000) == 300000
+    dt = datetime.fromtimestamp((signal.snapshot_ts + getattr(signal,"timeframe_ms",60000)) / 1000,
+                                tz=timezone.utc).astimezone(ZoneInfo(tz))
     rows = [
         f"{title} | {signal.symbol}",
         f"Scalp Sentinel {getattr(signal, 'strategy_version', 'v1').upper()} | Teyit: {signal.score}/{len(signal.checks)} | {dt:%Y-%m-%d %H:%M} ({tz})",
         "",
-        f"Giriş referansı: {fmt_price(entry, signal.tick_size)} USDT (son kapanmış 1dk, piyasa emri değildir)",
+        f"Giriş referansı: {fmt_price(entry, signal.tick_size)} USDT (son kapanmış {'5dk' if standard else '1dk'}, piyasa emri değildir)",
         f"Stop: {fmt_price(stop, signal.tick_size)} USDT | Fiyat riski: %{risk_pct:.2f}",
         f"TP1 (1.5R): {fmt_price(signal.tp1, signal.tick_size)} USDT",
         f"TP2 (2.5R): {fmt_price(signal.tp2, signal.tick_size)} USDT",
@@ -27,15 +29,21 @@ def format_signal(signal, tz):
         "Teyitler:",
     ]
     rows.extend(f"{'✓' if ok else '✗'} {name}" for name, ok in signal.checks.items())
+    if standard:
+        rows.extend([f"Strateji: {signal.strategy_version}",
+                     f"Teknik gerekçe: {signal.technical_reason}",
+                     f"Risk/ödül: TP1 1.5R; TP2 2.5R"])
     rows.extend([
         "",
         f"5dk ATR: {fmt_price(signal.atr5, signal.tick_size)} | Göreli hacim: {signal.rvol:.2f}x",
-        f"Net taker hacmi 15dk: {signal.cvd3:,.0f} | OI 1 saat: %{signal.oi_change_pct:+.2f}",
         f"Spread: {signal.spread_bps:.2f} baz puan",
         "",
         "UYARI: Otomatik emir değildir. Giriş son kapanmış mum referansıdır; "
         "gerçek fiyat değişebilir. TP seviyeleri matematiksel R hedefleridir.",
     ])
+    if not standard:
+        rows.insert(rows.index(f"Spread: {signal.spread_bps:.2f} baz puan"),
+                    f"Net taker hacmi 15dk: {signal.cvd3:,.0f} | OI 1 saat: %{signal.oi_change_pct:+.2f}")
     policy=getattr(signal,"journal",{})
     if policy.get("cost_model"):
         expires=datetime.fromtimestamp(policy["expires_at_ms"]/1000,tz=timezone.utc).astimezone(ZoneInfo(tz))

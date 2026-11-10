@@ -70,6 +70,31 @@ class BinanceClient:
             self._cache[key] = (bucket, value)
         return value
 
+    def scalp_snapshot(self, symbol, now_ms):
+        """Small, closed-candle snapshot for the standard 5m strategies."""
+        out = {}
+        for tf, duration in (("5m", 300000), ("15m", 900000)):
+            rows = self.cached((symbol, "standard", tf), now_ms // duration,
+                               "/fapi/v1/klines", symbol=symbol, interval=tf, limit=100)
+            bars = [r for r in rows if int(r[6]) + 250 <= now_ms]
+            if len(bars) < 60 or now_ms - (int(bars[-1][6]) + 1) > (30000 if tf == "5m" else duration + 15000):
+                # Retry an unpublished latest bar in the same bucket.
+                with self._cache_lock:
+                    self._cache.pop((symbol, "standard", tf), None)
+                raise DataPending(symbol, tf, now_ms - (int(bars[-1][6]) + 1) if bars else None, len(bars))
+            if any(int(b[0]) - int(a[0]) != duration for a, b in zip(bars, bars[1:])):
+                raise BinanceError(f"{symbol} noncontiguous {tf}")
+            for bar in bars:
+                o, h, l, c, v = map(float, bar[1:6])
+                if not all(isfinite(x) for x in (o, h, l, c, v)) or l <= 0 or v < 0 or not l <= min(o, c) <= max(o, c) <= h:
+                    raise BinanceError(f"{symbol} invalid {tf} candle")
+            out[tf] = bars
+        out["ticker"] = self.cached((symbol, "standard", "ticker"), now_ms // 300000,
+                                    "/fapi/v1/ticker/24hr", symbol=symbol)
+        out["book"] = self.get("/fapi/v1/ticker/bookTicker", symbol=symbol)
+        out["asof_ms"] = now_ms
+        return out
+
     def snapshot(self, symbol, now_ms):
         durations = {"1m":60000,"5m":300000,"15m":900000,"1h":3600000,"4h":14400000,"1d":86400000,"1w":604800000}
         from datetime import datetime, timezone

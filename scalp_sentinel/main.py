@@ -19,6 +19,7 @@ from .price_zones import (detect_price_zones, nearby_zone_alert,
                            format_price_zone_digest, current_price)
 from .storage import Cooldowns
 from .tracker import track_signals
+from .standard import assess as assess_standard
 
 log=logging.getLogger('sentinel')
 
@@ -52,6 +53,8 @@ class Runner:
         self.journal.alive()  # lost database session also loses the worker lock
         if now_ms is None:
             now_ms=int(time.time()*1000)
+        if cfg.primary_strategy=='standard':
+            return self.standard_tick(now_ms)
         full=now_ms//300000 != self.full_bucket
         if full:
             self.exchange=self.client.symbol_info()
@@ -285,6 +288,79 @@ class Runner:
                 log.info('performance_report %s',json.dumps(read_report(self.journal.conn),ensure_ascii=False))
         return sent
 
+    def standard_tick(self, now_ms):
+        """Scan every configured liquid perpetual on each closed 5m candle."""
+        bucket=now_ms//300000
+        if bucket==self.full_bucket:
+            log.info("standard_waiting_next_5m bucket=%d",bucket)
+            return 0
+        if now_ms%300000>90000:
+            self.full_bucket=bucket
+            log.info("standard_waiting_next_5m reason=old_closed_bar bucket=%d",bucket)
+            return 0
+        self.exchange=self.client.symbol_info()
+        remote=int(self.client.get('/fapi/v1/time')['serverTime'])
+        if abs(remote-int(time.time()*1000))>30000:
+            raise RuntimeError('exchange_clock_skew')
+        symbols=[s for s in self.cfg.symbols if s in self.exchange
+                 and self.exchange[s].get('contractType')=='PERPETUAL']
+        if not symbols:
+            raise RuntimeError('no_perpetual_symbols')
+        eligible=delivered=assessed=0
+        failures=[]
+        reasons={}
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            jobs={pool.submit(self.client.scalp_snapshot,s,now_ms):s for s in symbols}
+            for future in as_completed(jobs):
+                sym=jobs[future]
+                stage='snapshot'
+                try:
+                    snap=future.result()
+                    stage='assessment'
+                    tick=next(f['tickSize'] for f in self.exchange[sym]['filters']
+                              if f['filterType']=='PRICE_FILTER')
+                    signals,prefilter=assess_standard(sym,snap,tick,self.cfg)
+                    self.snapshots[sym]=snap
+                    for reason in prefilter:
+                        reasons[reason]=reasons.get(reason,0)+1
+                    for s in signals:
+                        assessed+=1
+                        failed=[name for name,passed in s.checks.items() if not passed]
+                        for reason in failed:
+                            reasons[reason]=reasons.get(reason,0)+1
+                        log.info("standard_assessment symbol=%s side=%s strategy=%s eligible=%s failed=%s",
+                                 sym,s.side,s.strategy_version,s.eligible,json.dumps(failed))
+                        if s.eligible:
+                            eligible+=1
+                            s.research={'snapshot_completed_ms':int(time.time()*1000),
+                                        'evaluation_completed_ms':int(time.time()*1000)}
+                            stage='delivery'
+                            delivered+=self.deliver([s],'primary',now_ms)
+                            stage='assessment'
+                except DataPending as exc:
+                    reasons['data_pending_'+exc.dataset]=reasons.get('data_pending_'+exc.dataset,0)+1
+                    failures.append(sym)
+                    log.info('standard_data_pending symbol=%s reason=%s',sym,str(exc))
+                except Exception as exc:
+                    # Delivery/DB failures must stop the worker; never skip an uncertain send.
+                    if stage=='delivery':
+                        raise
+                    if getattr(exc,'sqlstate',None) or type(exc).__module__.startswith('psycopg'):
+                        raise
+                    failures.append(sym)
+                    reasons['snapshot_or_assessment_error']=reasons.get('snapshot_or_assessment_error',0)+1
+                    log.warning('standard_symbol_failed symbol=%s kind=%s detail=%s',
+                                sym,type(exc).__name__,str(exc)[:140])
+        if len(failures)==len(symbols):
+            raise RuntimeError('all_standard_snapshots_failed')
+        self.full_bucket=bucket
+        log.info('standard_scan_finished symbols=%d assessed=%d eligible=%d delivered=%d failed=%d reasons=%s',
+                 len(symbols),assessed,eligible,delivered,len(failures),json.dumps(reasons,sort_keys=True))
+        if not self.cfg.dry_run:
+            track_signals(self.cfg.database_url,self.client,now_ms=int(time.time()*1000),initialize=False)
+            self.journal.settle_primary(self.client,int(time.time()*1000))
+        return delivered
+
     def deliver_confluences(self,alerts,now_ms):
         """Batch context observations; never create paper trades."""
         sent=0
@@ -397,7 +473,8 @@ class Runner:
             if any(p['symbol']==s.symbol for p in peers):
                 self.journal.decision(s,cohort,delivery_started_ms,'symbol_already_active')
                 continue
-            minutes=max(cfg.cooldown_minutes,240 if s.side=='SHORT' else 180)
+            minutes=(cfg.cooldown_minutes if cfg.primary_strategy=='standard'
+                     else max(cfg.cooldown_minutes,240 if s.side=='SHORT' else 180))
             if cohort=='primary':
                 if not self.storage.allowed(s.symbol,s.side,minutes):
                     self.journal.decision(s,cohort,delivery_started_ms,'cooldown')
@@ -415,12 +492,12 @@ class Runner:
             decision=int(time.time()*1000)
             reason=prepare(s,book,decision,cfg)
             log.info("delivery_latency cohort=%s symbol=%s side=%s candle_age_ms=%d result=%s",
-                     cohort,s.symbol,s.side,decision-(s.snapshot_ts+60000),reason or "ready")
+                     cohort,s.symbol,s.side,decision-(s.snapshot_ts+getattr(s,'timeframe_ms',60000)),reason or "ready")
             if cohort=='primary':
                 research=getattr(s,'research',{}) or {}
                 log.info("primary_delivery_phases symbol=%s side=%s result=%s snapshot_age_ms=%s eval_to_delivery_ms=%s quote_fetch_ms=%d quote_age_ms=%s",
                          s.symbol,s.side,reason or 'ready',
-                         (research['snapshot_completed_ms']-(s.snapshot_ts+60000)
+                         (research['snapshot_completed_ms']-(s.snapshot_ts+getattr(s,'timeframe_ms',60000))
                           if research.get('snapshot_completed_ms') is not None else None),
                          (decision-research['evaluation_completed_ms']
                           if research.get('evaluation_completed_ms') is not None else None),
