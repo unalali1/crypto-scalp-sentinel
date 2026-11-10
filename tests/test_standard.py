@@ -105,7 +105,7 @@ class StandardTests(unittest.TestCase):
         result=client.scalp_snapshot('TEST',now)
         self.assertTrue(all(int(x[6])<now for x in result['5m']))
         self.assertFalse(any('openInterest' in path for path,_ in client.calls))
-        with self.assertRaises(DataPending):client.scalp_snapshot('TEST',now+60000)
+        with self.assertRaises(DataPending):client.scalp_snapshot('TEST',now+300000)
 
     def test_worker_runs_once_per_closed_bar_without_flow_data(self):
         now=1800000003000

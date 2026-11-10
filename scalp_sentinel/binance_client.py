@@ -77,7 +77,8 @@ class BinanceClient:
             rows = self.cached((symbol, "standard", tf), now_ms // duration,
                                "/fapi/v1/klines", symbol=symbol, interval=tf, limit=100)
             bars = [r for r in rows if int(r[6]) + 250 <= now_ms]
-            if len(bars) < 60 or now_ms - (int(bars[-1][6]) + 1) > (30000 if tf == "5m" else duration + 15000):
+            expected_open = now_ms // duration * duration - duration
+            if len(bars) < 60 or int(bars[-1][0]) != expected_open:
                 # Retry an unpublished latest bar in the same bucket.
                 with self._cache_lock:
                     self._cache.pop((symbol, "standard", tf), None)
