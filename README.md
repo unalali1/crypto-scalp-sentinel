@@ -1,5 +1,26 @@
 # Crypto Scalp Sentinel
 
+## Production signal-only mode (`PRIMARY_STRATEGY=standard`)
+
+The standard scanner checks closed Binance USD-M perpetual 5-minute candles on
+each five-minute boundary, using 15-minute EMA 21/50 trend context. EMA 9/21/50
+pullback and volume breakout/retest are independent LONG/SHORT setups. Open
+interest, CVD, 1-minute triggers, swing cohorts and replay storage are not
+required for these alerts. Existing `v2.1` and `v3` paths remain available for
+rollback. Every assessed setup and rejection reason is logged; no setup means
+no trade alert.
+
+Keep `DRY_RUN=false` to send Telegram **paper signals** and track hypothetical
+fills. The project uses public market-data endpoints only and never submits
+exchange orders. `DRY_RUN=true` skips Telegram and PostgreSQL persistence.
+The standard mode defaults to a 45-minute maximum paper hold and a 0.40R
+round-trip cost cap (both configurable), with 1.5R/2.5R targets and break-even
+tracking after TP1. Shared quote freshness, spread, liquidity, price drift and
+deduplication gates still apply. `COOLDOWN_MINUTES` applies without the legacy
+three/four-hour floor. The old replay archive is not written in this mode,
+which prevents its unbounded disk growth. Existing archive rows require
+separate, deliberate database cleanup.
+
 Read-only Binance USDⓈ-M perpetual scanner for crypto and TradFi markets.
 **No exchange orders and no OpenAI calls.** Default watchlist includes 17 crypto
 pairs plus XAUUSDT (gold), XAGUSDT (silver) and BZUSDT (Brent crude). Thresholds

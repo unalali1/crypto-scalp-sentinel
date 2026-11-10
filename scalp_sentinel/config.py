@@ -45,8 +45,8 @@ class Config:
     context_chat_id: str = ""
 
     def validate(self):
-        if self.primary_strategy not in ("v2.1", "v3"):
-            raise ValueError("PRIMARY_STRATEGY must be v2.1 or v3")
+        if self.primary_strategy not in ("v2.1", "v3", "standard"):
+            raise ValueError("PRIMARY_STRATEGY must be v2.1, v3 or standard")
         if self.score_threshold not in (5,6) or self.min_stop_atr <= 0 or self.max_stop_atr < self.min_stop_atr:
             raise ValueError("Invalid signal thresholds")
         if not 2 <= self.entry_window_minutes <= 10 or not 30 <= self.max_hold_minutes <= 1440:
@@ -87,11 +87,11 @@ class Config:
             primary_strategy=os.getenv("PRIMARY_STRATEGY", "v2.1"),
             shadow_enabled=bool_env("SHADOW_ENABLED", True),
             entry_window_minutes=int(os.getenv("ENTRY_WINDOW_MINUTES", 5)),
-            max_hold_minutes=int(os.getenv("MAX_HOLD_MINUTES", 360)),
+            max_hold_minutes=int(os.getenv("MAX_HOLD_MINUTES", 45 if os.getenv("PRIMARY_STRATEGY") == "standard" else 360)),
             max_entry_drift_atr=float(os.getenv("MAX_ENTRY_DRIFT_ATR", .20)),
             fee_bps=float(os.getenv("PAPER_FEE_BPS", 5)),
             slippage_bps=float(os.getenv("PAPER_SLIPPAGE_BPS", 2)),
-            max_cost_r=float(os.getenv("MAX_COST_R", .25)),
+            max_cost_r=float(os.getenv("MAX_COST_R", .40 if os.getenv("PRIMARY_STRATEGY") == "standard" else .25)),
             max_open_signals=int(os.getenv("MAX_OPEN_SIGNALS", 3)),
             correlation_threshold=float(os.getenv("CORRELATION_THRESHOLD", .80)),
             archive_days=int(os.getenv("ARCHIVE_DAYS", 30)),
