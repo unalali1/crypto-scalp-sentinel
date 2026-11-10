@@ -96,6 +96,28 @@ class BinanceClient:
         out["asof_ms"] = now_ms
         return out
 
+    def context_candles(self, symbol, timeframe, now_ms):
+        """Fetch and validate the latest fully closed 4h or UTC daily candle."""
+        durations = {"4h": 14400000, "1d": 86400000}
+        duration = durations[timeframe]
+        key = (symbol, "context", timeframe)
+        rows = self.cached(key, now_ms // duration, "/fapi/v1/klines",
+                           symbol=symbol, interval=timeframe, limit=140)
+        bars = [r for r in rows if int(r[6]) + 250 <= now_ms]
+        expected_open = now_ms // duration * duration - duration
+        if len(bars) < 60 or int(bars[-1][0]) != expected_open:
+            with self._cache_lock:
+                self._cache.pop(key, None)
+            raise DataPending(symbol, timeframe,
+                              now_ms - (int(bars[-1][6]) + 1) if bars else None, len(bars))
+        if any(int(b[0]) - int(a[0]) != duration for a, b in zip(bars, bars[1:])):
+            raise BinanceError(f"{symbol} noncontiguous {timeframe}")
+        for bar in bars:
+            o, h, l, c, v = map(float, bar[1:6])
+            if not all(isfinite(x) for x in (o, h, l, c, v)) or l <= 0 or v < 0 or not l <= min(o, c) <= max(o, c) <= h:
+                raise BinanceError(f"{symbol} invalid {timeframe} candle")
+        return bars
+
     def snapshot(self, symbol, now_ms):
         durations = {"1m":60000,"5m":300000,"15m":900000,"1h":3600000,"4h":14400000,"1d":86400000,"1w":604800000}
         from datetime import datetime, timezone

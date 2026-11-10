@@ -36,6 +36,7 @@ class Runner:
         self.pending=set()
         self.level_zones={}
         self.last_context_bucket=None
+        self.last_long_context_buckets={}
         self.fib_digest_queue={}
         self.last_fib_digest_bucket=int(time.time()*1000)//900000
         self.full_bucket=None
@@ -356,16 +357,50 @@ class Runner:
         self.full_bucket=bucket
         log.info('standard_scan_finished symbols=%d assessed=%d eligible=%d delivered=%d failed=%d reasons=%s',
                  len(symbols),assessed,eligible,delivered,len(failures),json.dumps(reasons,sort_keys=True))
+        # A separate closed-bar pass follows time-sensitive scalp delivery.
+        self.long_context_tick(symbols,now_ms)
         if not self.cfg.dry_run:
             track_signals(self.cfg.database_url,self.client,now_ms=int(time.time()*1000),initialize=False)
             self.journal.settle_primary(self.client,int(time.time()*1000))
         return delivered
+
+    def long_context_tick(self,symbols,now_ms):
+        """Sample 4h/daily context at UTC close +5m, retrying delayed data."""
+        for tf,duration in (("4h",14400000),("1d",86400000)):
+            bucket=now_ms//duration
+            if (not 300000 <= now_ms%duration < 1200000
+                    or self.last_long_context_buckets.get(tf)==bucket):
+                continue
+            alerts=[]
+            failed=0
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                jobs={pool.submit(self.client.context_candles,s,tf,now_ms):s for s in symbols}
+                for future in as_completed(jobs):
+                    sym=jobs[future]
+                    try:
+                        rows=future.result()
+                        tick=next(f['tickSize'] for f in self.exchange[sym]['filters']
+                                  if f['filterType']=='PRICE_FILTER')
+                        alerts.extend(detect_confluences(sym,{tf:rows},tick,timeframes=(tf,)))
+                    except Exception as exc:
+                        failed+=1
+                        log.warning('confluence_data_failed symbol=%s timeframe=%s reason=%s',
+                                    sym,tf,str(exc)[:160])
+            sent=self.deliver_confluences(alerts,now_ms)
+            if not failed:
+                self.last_long_context_buckets[tf]=bucket
+            log.info('long_confluence_scan timeframe=%s scanned=%d failed=%d candidates=%d digests=%d retry=%s',
+                     tf,len(symbols),failed,len(alerts),sent,bool(failed))
 
     def deliver_confluences(self,alerts,now_ms):
         """Batch context observations; never create paper trades."""
         sent=0
         claimed=[]
         for alert in alerts:
+            if alert.get('timeframe') not in ('4h','1d'):
+                log.info('confluence_short_timeframe_suppressed symbol=%s timeframe=%s',
+                         alert.get('symbol'),alert.get('timeframe'))
+                continue
             if self.cfg.dry_run:
                 log.info("DRY_RUN confluence symbol=%s side=%s timeframe=%s indicators=%s zone_id=%s",
                          alert["symbol"],alert["side"],alert["timeframe"],

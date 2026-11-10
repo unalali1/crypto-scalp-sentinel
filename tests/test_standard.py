@@ -9,6 +9,7 @@ from scalp_sentinel.execution import prepare
 from scalp_sentinel.notifier import format_signal
 from scalp_sentinel.standard import assess
 from scalp_sentinel.main import Runner
+from scalp_sentinel.confluence import detect_confluences
 from test_execution_research import config
 
 
@@ -107,6 +108,26 @@ class StandardTests(unittest.TestCase):
         self.assertFalse(any('openInterest' in path for path,_ in client.calls))
         with self.assertRaises(DataPending):client.scalp_snapshot('TEST',now+300000)
 
+    def test_long_context_uses_latest_closed_bar_and_rejects_delayed_data(self):
+        class Client(BinanceClient):
+            def __init__(self):super().__init__('unused'); self.delayed=False
+            def get(self,path,**kwargs):
+                duration={'4h':14400000,'1d':86400000}[kwargs['interval']]
+                end=now//duration*duration
+                count=139 if self.delayed else 140
+                return [[end-(140-i)*duration,'100','101','99','100','10',
+                         end-(139-i)*duration-1] for i in range(count)]
+        now=1800000000000+57600000+300000
+        client=Client()
+        for tf in ('4h','1d'):
+            bars=client.context_candles('TEST',tf,now)
+            self.assertEqual(int(bars[-1][0]),now//({'4h':14400000,'1d':86400000}[tf])*({'4h':14400000,'1d':86400000}[tf])-({'4h':14400000,'1d':86400000}[tf]))
+        client.delayed=True
+        with self.assertRaises(DataPending):client.context_candles('TEST','4h',now+14400000)
+
+    def test_confluence_ignores_short_candles(self):
+        self.assertEqual(detect_confluences('TEST',snapshot(),'0.01'),[])
+
     def test_worker_runs_once_per_closed_bar_without_flow_data(self):
         now=1800000003000
         snap=snapshot()
@@ -117,6 +138,7 @@ class StandardTests(unittest.TestCase):
                 bar[6]+=shift
         class Client:
             calls=0
+            remote=now
             def symbol_info(self):
                 return {'TEST':{'contractType':'PERPETUAL','filters':[
                     {'filterType':'PRICE_FILTER','tickSize':'0.01'}]}}
@@ -124,20 +146,55 @@ class StandardTests(unittest.TestCase):
                 self.calls+=1
                 return snap
             def get(self,path,**kwargs):
-                if path.endswith('/time'):return {'serverTime':now}
+                if path.endswith('/time'):return {'serverTime':self.remote}
                 return {'bidPrice':'100.09','askPrice':'100.11','time':now}
+            def context_candles(self,symbol,tf,asof):
+                return [[0,'100','101','99','100','10',1]]*60
         client=Client()
         settings=replace(config(),primary_strategy='standard',symbols=('TEST',),
                          shadow_enabled=False,fee_bps=0,slippage_bps=0)
         runner=Runner(settings,client)
         try:
-            with patch('scalp_sentinel.main.time.time',return_value=now/1000):
+            with patch('scalp_sentinel.main.time.time',return_value=now/1000),\
+                 patch('scalp_sentinel.main.detect_confluences') as detect:
                 self.assertEqual(runner.tick(now),1)
                 self.assertEqual(runner.tick(now+60000),0)
-            self.assertEqual(client.calls,1)
+                detect.assert_not_called()
+            client.remote=now+300000
+            with patch('scalp_sentinel.main.time.time',return_value=client.remote/1000),\
+                 patch('scalp_sentinel.main.detect_confluences') as detect:
+                runner.tick(client.remote)
+                self.assertEqual(detect.call_count,1)
+                self.assertEqual(detect.call_args.kwargs['timeframes'],('4h',))
+            self.assertEqual(client.calls,2)
             self.assertEqual(len(runner.journal.memory_trades),1)
         finally:
             runner.close()
+
+    def test_long_context_only_after_close_and_once_per_timeframe(self):
+        now=1800000000000+57600000+300000  # UTC midnight + 5m
+        calls=[]
+        class Client:
+            def context_candles(self,symbol,tf,asof):
+                calls.append((symbol,tf))
+                return [[0,'100','101','99','100','10',1]]*60
+        runner=Runner.__new__(Runner)
+        runner.client=Client()
+        runner.exchange={'TEST':{'filters':[{'filterType':'PRICE_FILTER','tickSize':'0.01'}]}}
+        runner.last_long_context_buckets={}
+        alert={'alert_id':'TEST:4h:LONG:1','symbol':'TEST','side':'LONG','timeframe':'4h'}
+        with patch('scalp_sentinel.main.detect_confluences',return_value=[alert]) as detect,\
+             patch.object(runner,'deliver_confluences',return_value=1) as deliver:
+            runner.long_context_tick(['TEST'],now-300000)
+            self.assertEqual(calls,[])
+            runner.long_context_tick(['TEST'],now)
+            self.assertEqual({tf for _,tf in calls},{'4h','1d'})
+            self.assertEqual(detect.call_count,2)
+            self.assertEqual({call.kwargs['timeframes'] for call in detect.call_args_list},
+                             {('4h',),('1d',)})
+            self.assertEqual(deliver.call_count,2)
+            runner.long_context_tick(['TEST'],now+300000)
+            self.assertEqual(len(calls),2)
 
 
 if __name__=='__main__':unittest.main()
