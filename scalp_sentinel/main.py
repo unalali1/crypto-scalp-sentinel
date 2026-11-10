@@ -309,6 +309,7 @@ class Runner:
         eligible=delivered=assessed=0
         failures=[]
         reasons={}
+        context_snapshots={}
         with ThreadPoolExecutor(max_workers=3) as pool:
             jobs={pool.submit(self.client.scalp_snapshot,s,now_ms):s for s in symbols}
             for future in as_completed(jobs):
@@ -321,6 +322,7 @@ class Runner:
                               if f['filterType']=='PRICE_FILTER')
                     signals,prefilter=assess_standard(sym,snap,tick,self.cfg)
                     self.snapshots[sym]=snap
+                    context_snapshots[sym]=(snap,tick)
                     for reason in prefilter:
                         reasons[reason]=reasons.get(reason,0)+1
                     for s in signals:
@@ -356,6 +358,20 @@ class Runner:
         self.full_bucket=bucket
         log.info('standard_scan_finished symbols=%d assessed=%d eligible=%d delivered=%d failed=%d reasons=%s',
                  len(symbols),assessed,eligible,delivered,len(failures),json.dumps(reasons,sort_keys=True))
+        # Context alerts are independent of executable setups. Reuse the same
+        # validated closed 5m/15m candles, after time-sensitive trade delivery.
+        context_bucket=now_ms//900000
+        if context_bucket!=self.last_context_bucket:
+            alerts=[]
+            for sym,(snap,tick) in context_snapshots.items():
+                try:
+                    alerts.extend(detect_confluences(sym,snap,tick))
+                except Exception as exc:
+                    log.warning('confluence_eval_failed symbol=%s kind=%s',sym,type(exc).__name__)
+            context_sent=self.deliver_confluences(alerts,now_ms)
+            self.last_context_bucket=context_bucket
+            log.info('standard_confluence_finished symbols=%d candidates=%d digests=%d',
+                     len(context_snapshots),len(alerts),context_sent)
         if not self.cfg.dry_run:
             track_signals(self.cfg.database_url,self.client,now_ms=int(time.time()*1000),initialize=False)
             self.journal.settle_primary(self.client,int(time.time()*1000))

@@ -9,6 +9,9 @@ interest, CVD, 1-minute triggers, swing cohorts and replay storage are not
 required for these alerts. Existing `v2.1` and `v3` paths remain available for
 rollback. Every assessed setup and rejection reason is logged; no setup means
 no trade alert.
+The existing 5m/15m directional confluence digest runs independently once
+per 15-minute bucket from the same validated candles, after trade decisions.
+Confluence is a context notification, not an entry/stop/target trade signal.
 
 Keep `DRY_RUN=false` to send Telegram **paper signals** and track hypothetical
 fills. The project uses public market-data endpoints only and never submits

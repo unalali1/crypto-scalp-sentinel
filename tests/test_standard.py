@@ -117,6 +117,7 @@ class StandardTests(unittest.TestCase):
                 bar[6]+=shift
         class Client:
             calls=0
+            remote=now
             def symbol_info(self):
                 return {'TEST':{'contractType':'PERPETUAL','filters':[
                     {'filterType':'PRICE_FILTER','tickSize':'0.01'}]}}
@@ -124,17 +125,29 @@ class StandardTests(unittest.TestCase):
                 self.calls+=1
                 return snap
             def get(self,path,**kwargs):
-                if path.endswith('/time'):return {'serverTime':now}
+                if path.endswith('/time'):return {'serverTime':self.remote}
                 return {'bidPrice':'100.09','askPrice':'100.11','time':now}
         client=Client()
         settings=replace(config(),primary_strategy='standard',symbols=('TEST',),
                          shadow_enabled=False,fee_bps=0,slippage_bps=0)
         runner=Runner(settings,client)
         try:
-            with patch('scalp_sentinel.main.time.time',return_value=now/1000):
+            alert=dict(alert_id='TEST:5m:LONG:1',symbol='TEST',side='LONG',
+                       timeframe='5m',indicators=['RSI','MACD'],pivot_ts=1,
+                       zone_low=99,zone_high=101,price=100,age_bars=0)
+            with patch('scalp_sentinel.main.time.time',return_value=now/1000),\
+                 patch('scalp_sentinel.main.detect_confluences',return_value=[alert]) as detect,\
+                 patch.object(runner,'deliver_confluences',return_value=1) as confluence_delivery:
                 self.assertEqual(runner.tick(now),1)
                 self.assertEqual(runner.tick(now+60000),0)
-            self.assertEqual(client.calls,1)
+                self.assertEqual(detect.call_count,1)
+                confluence_delivery.assert_called_once_with([alert],now)
+            client.remote=now+300000
+            with patch('scalp_sentinel.main.time.time',return_value=client.remote/1000),\
+                 patch('scalp_sentinel.main.detect_confluences') as detect:
+                runner.tick(client.remote)
+                detect.assert_not_called()
+            self.assertEqual(client.calls,2)
             self.assertEqual(len(runner.journal.memory_trades),1)
         finally:
             runner.close()
