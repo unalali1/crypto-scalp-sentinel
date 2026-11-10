@@ -64,7 +64,7 @@ class Delivery(unittest.TestCase):
                 symbol=symbol,low=99,high=101,center=100,price=100,distance=0,
                 sources=['D open','W close'],role='support',strength='strong',atr1h=2))
             confluences.append(dict(alert_id=f'{symbol}:pivot',symbol=symbol,
-                side='LONG',timeframe='5m',indicators=['RSI','MACD'],
+                side='LONG',timeframe='4h',indicators=['RSI','MACD'],
                 zone_low=99,zone_high=101,pivot_ts=1))
         with patch('scalp_sentinel.main.send_telegram') as send:
             self.assertEqual(r.deliver_confluences(confluences,10*900000),1)
@@ -79,10 +79,21 @@ class Delivery(unittest.TestCase):
         r.cfg=replace(config(dry_run=False),context_chat_id='context-room')
         r.journal=Journal()
         alert=dict(alert_id='BTC:pivot',symbol='BTCUSDT',side='LONG',
-                   timeframe='5m',indicators=['RSI'],zone_low=99,zone_high=101,pivot_ts=1)
+                   timeframe='1d',indicators=['RSI'],zone_low=99,zone_high=101,pivot_ts=1)
         with patch('scalp_sentinel.main.send_telegram') as send:
             self.assertEqual(r.deliver_confluences([alert],900000),1)
         self.assertEqual(send.call_args.args[1],'context-room')
+
+    def test_short_confluence_delivery_is_suppressed(self):
+        r=Runner.__new__(Runner)
+        r.cfg=config(dry_run=False)
+        r.journal=Journal()
+        alert=dict(alert_id='BTC:5m:LONG:1',symbol='BTCUSDT',side='LONG',
+                   timeframe='5m',indicators=['RSI'],pivot_ts=1)
+        with patch('scalp_sentinel.main.send_telegram') as send:
+            self.assertEqual(r.deliver_confluences([alert],900000),0)
+            send.assert_not_called()
+        self.assertEqual(r.journal.memory_confluences,set())
 
     def test_eligible_signal_is_delivered_before_slow_other_symbol(self):
         client=FakeClient()

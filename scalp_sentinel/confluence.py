@@ -144,10 +144,10 @@ def _series_divergences(rows):
     return output
 
 
-def detect_confluences(symbol,snapshot,tick_size):
+def detect_confluences(symbol,snapshot,tick_size,timeframes=("4h","1d")):
     """Find non-repainting divergence + nearby confirmed-pivot confluence zones."""
     alerts=[]
-    for timeframe in ("5m","15m"):
+    for timeframe in timeframes:
         rows=snapshot.get(timeframe) or []
         if len(rows)<60:
             continue

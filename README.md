@@ -9,8 +9,9 @@ interest, CVD, 1-minute triggers, swing cohorts and replay storage are not
 required for these alerts. Existing `v2.1` and `v3` paths remain available for
 rollback. Every assessed setup and rejection reason is logged; no setup means
 no trade alert.
-The existing 5m/15m directional confluence digest runs independently once
-per 15-minute bucket from the same validated candles, after trade decisions.
+Directional confluence digests use only fully closed 4-hour and UTC daily
+candles, checked shortly after each timeframe closes. Short-term confluence
+notifications are disabled; 5-minute scalp trade signals remain independent.
 Confluence is a context notification, not an entry/stop/target trade signal.
 
 Keep `DRY_RUN=false` to send Telegram **paper signals** and track hypothetical
@@ -65,8 +66,8 @@ snapshot can consume a rolling alert slot before a later, stronger candidate;
 the old global score sort could not be preserved without waiting. The delivery
 quote is still checked at real wall-clock time.
 
-Context-only confluence and price-zone detection runs after signal delivery on
-one full scan per 15-minute bucket. Confluences and strong price zones are sent
+In the legacy V2 path, price-zone detection runs after signal delivery on
+one full scan per 15-minute bucket. Confluences use only 4h/1d candles. Strong price zones are sent
 as bounded digests; standalone Fibonacci levels keep their own digest. Context
 sampling is less frequent, so a zone touched only between samples may not be
 reported. It never creates a trade outcome.
