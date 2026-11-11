@@ -45,6 +45,11 @@ class PostgresForward(unittest.TestCase):
             c.mark_sent(s.symbol,s.side,s)
         self.assertFalse(j.pending_delivery())
         j.record_standard_scan(NOW,dict(symbols=1,eligible=1,assessed=1,delivered=1,failed=0,decisions=[],reasons={}))
+        # Reproduce the production legacy key with an existing outcome. The
+        # next connection must migrate it without losing history or claims.
+        c.conn.execute('ALTER TABLE scalp_signal_outcomes DROP CONSTRAINT scalp_outcomes_setup_key')
+        c.conn.execute('ALTER TABLE scalp_signal_outcomes ADD CONSTRAINT scalp_signal_outcomes_symbol_side_signal_ts_key UNIQUE(symbol,side,signal_ts)')
+        c.conn.commit()
         c2=self.storage(); j2=Journal(c2.conn)
         self.assertFalse(j2.lock())
         self.assertFalse(j2.claim('primary',s,NOW))
@@ -83,7 +88,9 @@ class PostgresForward(unittest.TestCase):
             journal_json=journal_json || '{"net_r_low":-20,"costs_complete":true}'::jsonb
             WHERE symbol='OLD'""",(NOW-1000,))
         r.storage.conn.commit()
-        first=signal(); second=signal(); second.setup_id+=':second-pattern'
+        first=signal(); second=signal()
+        second.strategy_version='breakout-retest'
+        second.setup_id=second.setup_id.replace('ema-pullback','breakout-retest')
         with patch('scalp_sentinel.main.send_telegram') as send:
             with patch('scalp_sentinel.main.time.time',return_value=NOW/1000):
                 self.assertEqual(r.deliver([copy.deepcopy(first)],'primary',NOW),1)

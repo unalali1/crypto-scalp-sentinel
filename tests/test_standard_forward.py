@@ -101,7 +101,9 @@ class StandardForward(unittest.TestCase):
                 dict(cohort='primary',symbol='OLD',side='LONG',status='STOPPED',sent_at_ms=NOW-600000,
                      finished_at_ms=NOW-1000,journal_json={'costs_complete':complete,'risk_pct':.5,'net_r_low':-20})
                 for complete in (True,False))
-            first=signal(); second=signal(); second.setup_id+=':new-pattern'
+            first=signal(); second=signal()
+            second.strategy_version='breakout-retest'
+            second.setup_id=second.setup_id.replace('ema-pullback','breakout-retest')
             with patch('scalp_sentinel.main.time.time',return_value=NOW/1000), \
                  patch.object(r.storage,'allowed',side_effect=AssertionError('No account cooldown for ideas')), \
                  patch.object(r.journal,'recent_count',side_effect=AssertionError('No idea quota')):

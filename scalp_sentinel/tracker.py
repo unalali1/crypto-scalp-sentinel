@@ -40,7 +40,7 @@ DDL = """CREATE TABLE IF NOT EXISTS scalp_signal_outcomes (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     strategy_version TEXT NOT NULL DEFAULT 'v1',
     journal_json JSONB NOT NULL DEFAULT '{}',
-    UNIQUE(symbol, side, signal_ts)
+    CONSTRAINT scalp_outcomes_setup_key UNIQUE(symbol, side, signal_ts, strategy_version)
 )"""
 
 
@@ -48,6 +48,13 @@ def init_db(conn):
     conn.execute(DDL)
     conn.execute("ALTER TABLE scalp_signal_outcomes ADD COLUMN IF NOT EXISTS strategy_version TEXT NOT NULL DEFAULT 'v1'")
     conn.execute("ALTER TABLE scalp_signal_outcomes ADD COLUMN IF NOT EXISTS journal_json JSONB NOT NULL DEFAULT '{}'")
+    # Independent standard strategies may recommend the same symbol/side/bar.
+    # Install the wider key before removing the old restriction, in one
+    # transaction; existing outcomes and their IDs are preserved.
+    conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS scalp_outcomes_setup_key
+        ON scalp_signal_outcomes(symbol,side,signal_ts,strategy_version)""")
+    conn.execute("""ALTER TABLE scalp_signal_outcomes DROP CONSTRAINT IF EXISTS
+        scalp_signal_outcomes_symbol_side_signal_ts_key""")
     conn.execute("""CREATE OR REPLACE VIEW scalp_signal_performance AS
         SELECT id, symbol, side, signal_ts, sent_at_ms, score,
                entry_price, stop_price, tp1_price, tp2_price,
@@ -68,7 +75,7 @@ def record_sent(conn, signal, sent_at_ms):
          tp1_price, tp2_price, score, checks_json, rvol, cvd,
          oi_change_pct, last_checked_ms, strategy_version, journal_json)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s::jsonb)
-        ON CONFLICT (symbol, side, signal_ts) DO NOTHING""",
+        ON CONFLICT (symbol, side, signal_ts, strategy_version) DO NOTHING""",
         (signal.symbol, signal.side, signal.snapshot_ts, sent_at_ms,
          signal.entry, signal.stop, signal.tp1, signal.tp2, signal.score,
          json.dumps(signal.checks), signal.rvol, signal.cvd3,
