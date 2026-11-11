@@ -6,6 +6,8 @@ import time
 class Cooldowns:
     def __init__(self, database_url, dry_run):
         self.is_pg = database_url.startswith(("postgres://", "postgresql://"))
+        if not dry_run and database_url and not self.is_pg:
+            raise ValueError('DATABASE_URL must be a PostgreSQL URL')
         if not database_url and not dry_run:
             raise RuntimeError("DATABASE_URL (PostgreSQL) is required for live Telegram mode")
         if self.is_pg:

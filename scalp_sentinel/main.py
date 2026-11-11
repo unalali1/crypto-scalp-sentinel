@@ -58,6 +58,7 @@ class Runner:
         if cfg.primary_strategy=='standard':
             sent = self.standard_tick(now_ms)
             self.standard_maintenance(int(time.time()*1000))
+            log.info('standard_cycle_duration_ms=%d',int((time.monotonic()-tick_started)*1000))
             return sent
         full=now_ms//300000 != self.full_bucket
         if full:
@@ -370,10 +371,20 @@ class Runner:
         # Quote validation/cost scoring is done for the entire collected set.
         # No candidate is sent during asynchronous arrival processing.
         self.standard_decisions=[]
+        fresh_books={}
+        if pro and candidates:
+            try:
+                books=self.client.get('/fapi/v1/ticker/bookTicker')
+                fresh_books={b['symbol']:b for b in books} if isinstance(books,list) else {}
+            except BinanceError:
+                log.warning('standard_ranking_quotes_unavailable')
         ready=[]
         for signal in candidates:
             if pro:
-                reason=prepare(signal,self.snapshots[signal.symbol]['book'],int(time.time()*1000),self.cfg)
+                book=fresh_books.get(signal.symbol,{})
+                reason=prepare(signal,book,int(time.time()*1000),self.cfg)
+                if not reason:
+                    self.snapshots[signal.symbol]['book']=book
                 if reason:
                     self.standard_decision(signal,now_ms,reason)
                     continue

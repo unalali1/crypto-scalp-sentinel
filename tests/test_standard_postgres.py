@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import psycopg
 from psycopg import sql
-from psycopg.conninfo import make_conninfo
+from urllib.parse import urlencode
 from scalp_sentinel.storage import Cooldowns
 from scalp_sentinel.journal import Journal
 from scalp_sentinel.main import Runner
@@ -21,7 +21,7 @@ class PostgresForward(unittest.TestCase):
         self.admin=psycopg.connect(os.environ['TEST_DATABASE_URL'],autocommit=True)
         self.schema='test_scalp_'+uuid.uuid4().hex
         self.admin.execute(sql.SQL('CREATE SCHEMA {}').format(sql.Identifier(self.schema)))
-        self.dsn=make_conninfo(os.environ['TEST_DATABASE_URL'],options='-csearch_path='+self.schema)
+        self.dsn=os.environ['TEST_DATABASE_URL']+'?'+urlencode({'options':'-csearch_path='+self.schema})
         self.resources=[]
 
     def tearDown(self):

@@ -123,7 +123,7 @@ class StandardForward(unittest.TestCase):
         self.assertEqual(out['filled_at_ms'],start+60000)
 
     def test_market_delay_embeds_entry_friction_once_and_rounds_tick(self):
-        s=signal(); prepare(s,snap()['book'],NOW,settings())
+        s=signal(); prepare(s,snap()['book'],NOW,settings(max_entry_drift_atr=.3))
         t=paper_trade(s,NOW); t['journal_json']['entry_mode']='market_delayed'
         ts=t['last_checked_ms']+60000
         out=advance_trade(t,[bar(ts,100.10,100.20,100.0,100.15)])
@@ -178,7 +178,8 @@ class StandardForward(unittest.TestCase):
                 return {s:dict(contractType='PERPETUAL',filters=[dict(filterType='PRICE_FILTER',tickSize='0.01')]) for s in ('A','Z')}
             def scalp_snapshot(self,symbol,asof,deadline=None):return copy.deepcopy(data)
             def get(self,path,**kwargs):
-                return {'serverTime':NOW} if path.endswith('/time') else data['book']
+                if path.endswith('/time'):return {'serverTime':NOW}
+                return data['book'] if kwargs.get('symbol') else [dict(data['book'],symbol=s) for s in ('A','Z')]
         def assess_one(symbol_,*args):
             s=signal(symbol=symbol_); s.eligible=True
             return [s],[]
@@ -210,3 +211,15 @@ class StandardForward(unittest.TestCase):
             with self.assertRaises(BinanceError):c.get('/fapi/v1/time')
             with self.assertRaisesRegex(BinanceError,'cooldown'):c.get('/fapi/v1/time')
         self.assertEqual(session.get.call_count,1)
+
+    def test_market_delay_outside_original_drift_limit_is_no_entry(self):
+        s=signal(); prepare(s,snap()['book'],NOW,settings())
+        t=paper_trade(s,NOW); t['journal_json']['entry_mode']='market_delayed'
+        ts=t['last_checked_ms']+60000
+        out=advance_trade(t,[bar(ts,100.50,100.60,100.40,100.55)])
+        self.assertEqual(out['status'],'NO_ENTRY')
+        self.assertIsNone(out['filled_at_ms'])
+
+    def test_live_invalid_database_url_fails_closed(self):
+        from scalp_sentinel.storage import Cooldowns
+        with self.assertRaises(ValueError):Cooldowns('host=localhost dbname=test',False)
