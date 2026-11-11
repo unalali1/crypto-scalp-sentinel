@@ -155,8 +155,13 @@ class Journal:
                 WHERE finished_at_ms >= %s AND finished_at_ms <= %s''',(start,now_ms)).fetchall()]
             self.conn.commit()
         # Conservative realized loss allowance. Gains do not replenish it.
-        return sum(max(0,-p.get('net_r_low',0))*p.get('risk_pct',.5)/(1+p.get('estimated_cost_r',0))
-                   for p in policies if p.get('net_r_low') is not None)
+        loss=0.0
+        for p in policies:
+            risk=p.get('risk_pct',.5)
+            net=p.get('net_r_low')
+            known=max(0,-net)*risk/(1+p.get('estimated_cost_r',0)) if net is not None else 0
+            loss += known if p.get('costs_complete') else max(risk,known)
+        return loss
 
     def add_standard_shadows(self,signal,now_ms):
         for kind in ('hold30','hold60','market-delay'):

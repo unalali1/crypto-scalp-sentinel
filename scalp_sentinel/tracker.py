@@ -123,11 +123,13 @@ def advance_trade(trade, candles):
             if state=='AWAITING_ENTRY' and opened < trade['sent_at_ms']+policy.get('fill_delay_ms',0):
                 trade['last_checked_ms']=opened
                 continue
-            if state=='AWAITING_ENTRY' and policy.get('entry_mode')=='market_delayed' and opened < entry_deadline:
+            if state=='AWAITING_ENTRY' and policy.get('entry_mode')=='market_delayed' and opened+MINUTE <= entry_deadline:
                 sign=-1 if short else 1
                 # A full future minute open is the reproducible latency proxy.
                 # Entry spread + slip are embedded here, never debited again.
-                fill=opening*(1+sign*(policy['spread_bps']/2+policy['slippage_bps'])/10000)
+                from .engine import price_round
+                fill=price_round(opening*(1+sign*(policy['spread_bps']/2+policy['slippage_bps'])/10000),
+                                 policy['tick_size'],up=sign==1)
                 if not policy['price_min'] <= fill <= policy['price_max'] or sign*(fill-stop)<=0 or sign*(tp1-fill)<=0:
                     trade.update(status='NO_ENTRY',finished_at_ms=opened,last_checked_ms=opened)
                     policy.update(net_r_low=None,net_r_high=None,costs_complete=True)
@@ -276,6 +278,8 @@ def track_signals(database_url, client, now_ms=None, initialize=True, budget_sec
             trade = dict(zip(COLUMNS, row))
             try:
                 for _ in range(4):  # bounded work per signal; next cron resumes
+                    if time.monotonic()>=deadline:
+                        break
                     start = trade["last_checked_ms"] + MINUTE
                     if start > last_closed_open or trade["status"] not in ACTIVE:
                         break

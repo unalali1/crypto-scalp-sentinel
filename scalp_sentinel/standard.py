@@ -101,6 +101,11 @@ def assess(symbol, snapshot, tick_size, cfg):
         context = regime_context(snapshot)
         for signal in output:
             signal.research = dict(context, strategy_revision='standard-v2')
+            # Predeclared extreme-volatility safety pause, independent of the
+            # unvalidated TREND/RANGE ranking hypothesis.
+            signal.checks['extreme volatility pause'] = context['shock_ratio'] < 6
+            signal.eligible = all(signal.checks.values())
+            signal.score = sum(signal.checks.values())
             if cfg.regime_filter_mode == 'enforce':
                 signal.checks['market regime'] = context['regime'] == 'TREND'
                 signal.eligible = all(signal.checks.values())

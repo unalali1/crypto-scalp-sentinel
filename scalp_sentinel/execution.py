@@ -85,7 +85,7 @@ def prepare_standard(signal, book, now_ms, cfg):
     entry = min(reference, bid) if sign == 1 else max(reference, ask)
     entry = price_round(entry, signal.tick_size, up=sign == -1)
     risk = sign*(entry-signal.stop)
-    if risk <= 0 or not cfg.min_stop_atr <= risk/signal.atr5 <= cfg.max_stop_atr:
+    if not isfinite(risk) or risk <= 0 or not cfg.min_stop_atr <= risk/signal.atr5 <= cfg.max_stop_atr:
         return 'invalid_stop'
     exit_bps = spread/2 + cfg.slippage_bps
     cost_r = (2*cfg.fee_bps+exit_bps)/10000*entry/risk
@@ -109,7 +109,7 @@ def prepare_standard(signal, book, now_ms, cfg):
         expires_at_ms=now_ms+cfg.entry_window_minutes*60000,
         price_min=reference-cfg.max_entry_drift_atr*signal.atr5,
         price_max=reference+cfg.max_entry_drift_atr*signal.atr5,
-        fill_delay_ms=30000, fill_penetration=float(signal.tick_size),
+        fill_delay_ms=30000, fill_penetration=float(signal.tick_size), tick_size=signal.tick_size,
         estimated_cost_r=cost_r, estimated_net_tp1_rr=(1.5-cost_r)/(1+cost_r),
         market_scenario=dict(entry=market, reference_drift_bps=sign*(market-reference)/reference*10000,
             cost_r=(2*cfg.fee_bps+exit_bps)/10000*market/market_risk if market_risk>0 else None,

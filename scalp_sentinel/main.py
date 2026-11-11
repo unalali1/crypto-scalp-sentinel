@@ -363,6 +363,9 @@ class Runner:
         finally:
             pool.shutdown(wait=False,cancel_futures=True)
         if not self.snapshots:
+            self.journal.record_standard_scan(bucket*300000,dict(symbols=len(symbols),assessed=assessed,
+                eligible=eligible,delivered=0,failed=len(failures),reasons=reasons,
+                duration_ms=int((time.monotonic()-started)*1000),decisions=[],ranking=[]))
             raise RuntimeError('all_standard_snapshots_failed')
         # Quote validation/cost scoring is done for the entire collected set.
         # No candidate is sent during asynchronous arrival processing.
@@ -545,6 +548,8 @@ class Runner:
                 self.journal.decision(s,cohort,stamp,reason)
         delivery_started_ms=int(time.time()*1000)
         if cohort=='primary' and self.journal.pending_delivery():
+            for candidate in signals:
+                record_decision(candidate,delivery_started_ms,'delivery_uncertain')
             log.error('delivery_uncertain_primary_paused reconciliation_required=true')
             return 0
         peers=self.journal.active(cohort)
@@ -569,7 +574,9 @@ class Runner:
                 record_decision(s,delivery_started_ms,'cooldown')
                 continue
             if pro:
-                reason='daily_loss_limit' if daily_loss>=cfg.daily_loss_limit_pct else exposure(s,peers,self.snapshots,cfg)
+                reserved=sum((p.get('journal_json') or {}).get('risk_pct',.5) for p in peers)
+                reason=('daily_loss_limit' if daily_loss+reserved+cfg.risk_per_trade_pct>cfg.daily_loss_limit_pct+1e-9
+                        else exposure(s,peers,self.snapshots,cfg))
                 if reason:
                     self.standard_decision(s,delivery_started_ms,reason)
                     continue

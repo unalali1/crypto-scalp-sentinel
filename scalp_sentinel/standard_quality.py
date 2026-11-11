@@ -1,5 +1,5 @@
 """Predeclared diagnostics and ranking, never a fitted probability of success."""
-from math import isfinite, log10
+from math import log10
 from .engine import atr, candles, ema
 from .research import correlation, return_series
 
@@ -79,7 +79,8 @@ def rank(signal, snapshot, snapshots, peers, cfg):
         structure=15*clip(room/1.5),
         volume=10*clip(signal.rvol/1.5),
         entry=10*clip(1-entry_distance/3),
-        liquidity=10*clip(log10(max(1, float(snapshot['ticker']['quoteVolume']))/cfg.min_quote_volume_usdt+1)/2),
+        liquidity=5*clip(log10(max(1, float(snapshot['ticker']['quoteVolume']))/cfg.min_quote_volume_usdt+1)/2)
+            +5*clip(log10(1+p['top_book_notional_usdt']/1000)/3),
         volatility=10*(1 if context['regime']=='TREND' else .4 if context['regime']=='RANGE' else 0),
         net_reward_risk=10*clip((min(1.5, room)-cost)/(1+cost)/1.5),
         costs=10*clip(1-cost/cfg.max_cost_r),
