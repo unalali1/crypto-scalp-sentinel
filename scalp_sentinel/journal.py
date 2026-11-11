@@ -2,6 +2,10 @@
 import gzip
 import json
 import logging
+import time
+from copy import deepcopy
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from .tracker import ACTIVE, MINUTE, advance_trade, COLUMNS, _persist
 from .performance import settle_funding
 
@@ -59,6 +63,11 @@ class Journal:
         self.memory_price_zone_state={}
         self.memory_price_zone_events=[]
         if conn is not None:
+            conn.execute("""CREATE TABLE IF NOT EXISTS scalp_standard_scans (
+                observed_ms BIGINT PRIMARY KEY, metrics JSONB NOT NULL)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS scalp_daily_reports (
+                report_day TEXT PRIMARY KEY, report JSONB NOT NULL,
+                created_ms BIGINT NOT NULL, delivery TEXT NOT NULL DEFAULT 'disabled')""")
             conn.execute("""CREATE TABLE IF NOT EXISTS scalp_setup_claims (
                 cohort TEXT NOT NULL, setup_id TEXT NOT NULL, symbol TEXT NOT NULL,
                 claimed_ms BIGINT NOT NULL, delivery TEXT NOT NULL DEFAULT 'reserved',
@@ -127,6 +136,44 @@ class Journal:
                 symbol TEXT,side TEXT,score INTEGER,rvol DOUBLE PRECISION,completed_ms BIGINT)
             ON CONFLICT DO NOTHING""",(cohort,observed_ms,json.dumps(rows)))
         self.conn.commit()
+
+    def record_standard_scan(self,now_ms,metrics):
+        if self.conn is not None:
+            self.conn.execute('INSERT INTO scalp_standard_scans VALUES (%s,%s::jsonb) ON CONFLICT DO NOTHING',
+                              (now_ms,json.dumps(metrics)))
+            self.conn.commit()
+
+    def daily_loss_pct(self,now_ms,tz):
+        local=datetime.fromtimestamp(now_ms/1000,tz=ZoneInfo(tz))
+        start=int(local.replace(hour=0,minute=0,second=0,microsecond=0).timestamp()*1000)
+        if self.conn is None:
+            trades=[t for t in self.memory_trades if t.get('cohort')=='primary'
+                    and t.get('finished_at_ms') is not None and t['finished_at_ms']>=start]
+            policies=[t.get('journal_json') or {} for t in trades]
+        else:
+            policies=[r[0] for r in self.conn.execute('''SELECT journal_json FROM scalp_signal_outcomes
+                WHERE finished_at_ms >= %s AND finished_at_ms <= %s''',(start,now_ms)).fetchall()]
+            self.conn.commit()
+        # Conservative realized loss allowance. Gains do not replenish it.
+        loss=0.0
+        for p in policies:
+            risk=p.get('risk_pct',.5)
+            net=p.get('net_r_low')
+            known=max(0,-net)*risk/(1+p.get('estimated_cost_r',0)) if net is not None else 0
+            loss += known if p.get('costs_complete') else max(risk,known)
+        return loss
+
+    def add_standard_shadows(self,signal,now_ms):
+        for kind in ('hold30','hold60','market-delay'):
+            s=deepcopy(signal)
+            cohort='standard-'+kind
+            s.journal.update(parent_strategy=signal.strategy_version,parent_setup=signal.setup_id,
+                             paired_comparison=True)
+            if kind=='market-delay':
+                s.journal['entry_mode']='market_delayed'
+            else:
+                s.journal['max_hold_ms']=int(kind[4:])*60000
+            self.add_shadow(cohort,s,now_ms)
 
     def decision(self,signal,cohort,now_ms,reason):
         log.info('signal_decision cohort=%s symbol=%s side=%s reason=%s',cohort,signal.symbol,signal.side,reason)
@@ -295,9 +342,9 @@ class Journal:
         if self.conn is None:
             return [t for t in self.memory_trades if t.get("cohort")==cohort and t["status"] in ACTIVE]
         if cohort=="primary":
-            rows=self.conn.execute("SELECT symbol,side FROM scalp_signal_outcomes WHERE status IN (%s,%s,%s)",ACTIVE).fetchall()
+            rows=self.conn.execute("SELECT symbol,side,journal_json FROM scalp_signal_outcomes WHERE status IN (%s,%s,%s)",ACTIVE).fetchall()
             self.conn.commit()
-            return [dict(symbol=s,side=d) for s,d in rows]
+            return [dict(symbol=s,side=d,journal_json=p) for s,d,p in rows]
         rows=self.conn.execute("SELECT trade FROM scalp_shadow_outcomes WHERE cohort=%s AND status IN (%s,%s,%s)",(cohort,*ACTIVE)).fetchall()
         self.conn.commit()
         return [r[0] for r in rows]
@@ -422,14 +469,17 @@ class Journal:
                 (symbol,now_ms,s.strategy_version,s.side,json.dumps(s.checks),s.eligible,None))
         self.conn.commit()
 
-    def track_shadows(self,client,now_ms):
+    def track_shadows(self,client,now_ms,budget_seconds=30):
         if self.conn is None:
             return
         rows=self.conn.execute("""SELECT cohort,setup_id,trade FROM scalp_shadow_outcomes
             WHERE status IN (%s,%s,%s) OR (trade->'journal_json'->>'costs_complete')='false'
             ORDER BY sent_at_ms LIMIT 200""",ACTIVE).fetchall()
         self.conn.commit()
+        deadline=time.monotonic()+budget_seconds
         for cohort,setup,t in rows:
+            if time.monotonic()>=deadline:
+                break
             try:
                 t=catch_up(t,client,now_ms)
                 funding(t,client,now_ms)
@@ -440,13 +490,16 @@ class Journal:
                 self.conn.rollback()
                 log.warning("shadow_track_failed cohort=%s kind=%s",cohort,type(exc).__name__)
 
-    def settle_primary(self,client,now_ms):
+    def settle_primary(self,client,now_ms,budget_seconds=20):
         if self.conn is None:
             return
         rows=self.conn.execute("SELECT "+",".join(COLUMNS)+" FROM scalp_signal_outcomes "
             "WHERE status NOT IN (%s,%s,%s) AND journal_json->>'costs_complete'='false' ORDER BY sent_at_ms LIMIT 50",ACTIVE).fetchall()
         self.conn.commit()
+        deadline=time.monotonic()+budget_seconds
         for row in rows:
+            if time.monotonic()>=deadline:
+                break
             t=dict(zip(COLUMNS,row))
             try:
                 funding(t,client,now_ms)
@@ -460,9 +513,14 @@ class Journal:
             return
         cutoff=now_ms-days*86400000
         # Bounded deletions avoid long transactions after downtime.
-        for table in ("scalp_replay_frames","scalp_assessments","scalp_decisions","scalp_candidate_arrivals"):
+        for table in ("scalp_replay_frames","scalp_assessments","scalp_decisions","scalp_candidate_arrivals","scalp_standard_scans"):
             self.conn.execute(f"DELETE FROM {table} WHERE ctid IN (SELECT ctid FROM {table} WHERE observed_ms<%s LIMIT 10000)",(cutoff,))
         self.conn.execute("DELETE FROM scalp_setup_claims WHERE claimed_ms<%s AND (delivery='sent' OR cohort<>'primary')",(cutoff,))
         self.conn.execute("DELETE FROM scalp_confluence_alerts WHERE ctid IN (SELECT ctid FROM scalp_confluence_alerts WHERE detected_ms<%s LIMIT 10000)",(cutoff,))
         self.conn.execute("DELETE FROM scalp_price_zone_alerts WHERE ctid IN (SELECT ctid FROM scalp_price_zone_alerts WHERE detected_ms<%s LIMIT 10000)",(cutoff,))
+        # Compact paired exit experiments; primary history and daily reports stay.
+        self.conn.execute("""DELETE FROM scalp_shadow_outcomes WHERE ctid IN (
+            SELECT ctid FROM scalp_shadow_outcomes WHERE cohort LIKE 'standard-%%'
+            AND sent_at_ms<%s AND status NOT IN (%s,%s,%s)
+            AND trade->'journal_json'->>'costs_complete'='true' LIMIT 10000)""",(cutoff,*ACTIVE))
         self.conn.commit()

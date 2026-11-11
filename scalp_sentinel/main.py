@@ -6,7 +6,7 @@ import signal as system_signal
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
 from .binance_client import BinanceClient, BinanceError, DataPending
 from .config import Config
 from .engine import evaluate, prefilter_rejections
@@ -20,6 +20,7 @@ from .price_zones import (detect_price_zones, nearby_zone_alert,
 from .storage import Cooldowns
 from .tracker import track_signals
 from .standard import assess as assess_standard
+from .standard_quality import enhanced, rank, exposure
 
 log=logging.getLogger('sentinel')
 
@@ -55,7 +56,10 @@ class Runner:
         if now_ms is None:
             now_ms=int(time.time()*1000)
         if cfg.primary_strategy=='standard':
-            return self.standard_tick(now_ms)
+            sent = self.standard_tick(now_ms)
+            self.standard_maintenance(int(time.time()*1000))
+            log.info('standard_cycle_duration_ms=%d',int((time.monotonic()-tick_started)*1000))
+            return sent
         full=now_ms//300000 != self.full_bucket
         if full:
             self.exchange=self.client.symbol_info()
@@ -290,15 +294,13 @@ class Runner:
         return sent
 
     def standard_tick(self, now_ms):
-        """Scan every configured liquid perpetual on each closed 5m candle."""
+        """Bounded collection, global ranking, then a fresh quote before send."""
         bucket=now_ms//300000
-        if bucket==self.full_bucket:
-            log.info("standard_waiting_next_5m bucket=%d",bucket)
-            return 0
-        if now_ms%300000>90000:
+        if bucket==self.full_bucket or now_ms%300000>90000:
             self.full_bucket=bucket
-            log.info("standard_waiting_next_5m reason=old_closed_bar bucket=%d",bucket)
             return 0
+        started=time.monotonic()
+        pro=enhanced(self.cfg)
         self.exchange=self.client.symbol_info()
         remote=int(self.client.get('/fapi/v1/time')['serverTime'])
         if abs(remote-int(time.time()*1000))>30000:
@@ -307,62 +309,118 @@ class Runner:
                  and self.exchange[s].get('contractType')=='PERPETUAL']
         if not symbols:
             raise RuntimeError('no_perpetual_symbols')
-        eligible=delivered=assessed=0
+        # Never reuse a previous scan's failed/missing correlation context.
+        self.snapshots={}
+        peers=self.journal.active('primary')
+        wanted=set(symbols)
+        if pro:
+            wanted.update(p['symbol'] for p in peers)
+            if 'BTCUSDT' in self.exchange:
+                wanted.add('BTCUSDT')
+        candidates=[]
+        assessed=eligible=delivered=0
         failures=[]
         reasons={}
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            jobs={pool.submit(self.client.scalp_snapshot,s,now_ms):s for s in symbols}
-            for future in as_completed(jobs):
+        deadline=started+self.cfg.scan_budget_seconds
+        pool=ThreadPoolExecutor(max_workers=3)
+        jobs={pool.submit(self.client.scalp_snapshot,s,now_ms,deadline):s
+              for s in sorted(wanted)} if pro else {
+              pool.submit(self.client.scalp_snapshot,s,now_ms):s for s in symbols}
+        try:
+            for future in as_completed(jobs, timeout=max(.1,deadline-time.monotonic())):
                 sym=jobs[future]
-                stage='snapshot'
                 try:
                     snap=future.result()
-                    stage='assessment'
+                    self.snapshots[sym]=snap
+                    if sym not in symbols:
+                        continue
                     tick=next(f['tickSize'] for f in self.exchange[sym]['filters']
                               if f['filterType']=='PRICE_FILTER')
                     signals,prefilter=assess_standard(sym,snap,tick,self.cfg)
-                    self.snapshots[sym]=snap
                     for reason in prefilter:
                         reasons[reason]=reasons.get(reason,0)+1
-                    for s in signals:
+                    for signal in signals:
                         assessed+=1
-                        failed=[name for name,passed in s.checks.items() if not passed]
-                        for reason in failed:
-                            reasons[reason]=reasons.get(reason,0)+1
-                        log.info("standard_assessment symbol=%s side=%s strategy=%s eligible=%s failed=%s",
-                                 sym,s.side,s.strategy_version,s.eligible,json.dumps(failed))
-                        if s.eligible:
+                        for name,passed in signal.checks.items():
+                            if not passed:
+                                reasons[name]=reasons.get(name,0)+1
+                        if signal.eligible:
                             eligible+=1
-                            s.research={'snapshot_completed_ms':int(time.time()*1000),
-                                        'evaluation_completed_ms':int(time.time()*1000)}
-                            stage='delivery'
-                            delivered+=self.deliver([s],'primary',now_ms)
-                            stage='assessment'
-                except DataPending as exc:
-                    reasons['data_pending_'+exc.dataset]=reasons.get('data_pending_'+exc.dataset,0)+1
-                    failures.append(sym)
-                    log.info('standard_data_pending symbol=%s reason=%s',sym,str(exc))
+                            signal.research=dict(getattr(signal,'research',{}),
+                                snapshot_completed_ms=int(time.time()*1000),
+                                evaluation_completed_ms=int(time.time()*1000))
+                            candidates.append(signal)
                 except Exception as exc:
-                    # Delivery/DB failures must stop the worker; never skip an uncertain send.
-                    if stage=='delivery':
-                        raise
-                    if getattr(exc,'sqlstate',None) or type(exc).__module__.startswith('psycopg'):
-                        raise
                     failures.append(sym)
-                    reasons['snapshot_or_assessment_error']=reasons.get('snapshot_or_assessment_error',0)+1
-                    log.warning('standard_symbol_failed symbol=%s kind=%s detail=%s',
-                                sym,type(exc).__name__,str(exc)[:140])
-        if len(failures)==len(symbols):
+                    reason='data_pending_'+exc.dataset if isinstance(exc,DataPending) else 'snapshot_or_assessment_error'
+                    reasons[reason]=reasons.get(reason,0)+1
+                    log.warning('standard_symbol_failed symbol=%s kind=%s detail=%s',sym,type(exc).__name__,str(exc)[:140])
+        except FuturesTimeout:
+            for future,sym in jobs.items():
+                if not future.done():
+                    failures.append(sym)
+                    future.cancel()
+            reasons['scan_deadline']=len(failures)
+        finally:
+            pool.shutdown(wait=False,cancel_futures=True)
+        if not self.snapshots:
+            self.journal.record_standard_scan(bucket*300000,dict(symbols=len(symbols),assessed=assessed,
+                eligible=eligible,delivered=0,failed=len(failures),reasons=reasons,
+                duration_ms=int((time.monotonic()-started)*1000),decisions=[],ranking=[]))
             raise RuntimeError('all_standard_snapshots_failed')
+        # Quote validation/cost scoring is done for the entire collected set.
+        # No candidate is sent during asynchronous arrival processing.
+        self.standard_decisions=[]
+        fresh_books={}
+        if pro and candidates:
+            try:
+                books=self.client.get('/fapi/v1/ticker/bookTicker')
+                fresh_books={b['symbol']:b for b in books} if isinstance(books,list) else {}
+            except BinanceError:
+                log.warning('standard_ranking_quotes_unavailable')
+        ready=[]
+        for signal in candidates:
+            if pro:
+                book=fresh_books.get(signal.symbol,{})
+                reason=prepare(signal,book,int(time.time()*1000),self.cfg)
+                if not reason:
+                    self.snapshots[signal.symbol]['book']=book
+                if reason:
+                    self.standard_decision(signal,now_ms,reason)
+                    continue
+                rank(signal,self.snapshots[signal.symbol],self.snapshots,peers,self.cfg)
+            ready.append(signal)
+        delivered=self.deliver(ready,'primary',now_ms)
         self.full_bucket=bucket
-        log.info('standard_scan_finished symbols=%d assessed=%d eligible=%d delivered=%d failed=%d reasons=%s',
-                 len(symbols),assessed,eligible,delivered,len(failures),json.dumps(reasons,sort_keys=True))
-        # A separate closed-bar pass follows time-sensitive scalp delivery.
+        duration=int((time.monotonic()-started)*1000)
+        metrics=dict(symbols=len(symbols),assessed=assessed,eligible=eligible,
+            delivered=delivered,failed=len(failures),duration_ms=duration,reasons=reasons,
+            decisions=self.standard_decisions,
+            ranking=[dict(symbol=s.symbol,side=s.side,strategy=s.strategy_version,
+                          score=getattr(s,'quality_score',s.score),
+                          regime=(getattr(s,'journal',{}) or {}).get('regime'))
+                     for s in sorted(ready,key=lambda s:-getattr(s,'quality_score',s.score))])
+        self.journal.record_standard_scan(bucket*300000,metrics)
+        log.info('standard_scan_finished symbols=%d assessed=%d eligible=%d delivered=%d failed=%d duration_ms=%d reasons=%s',
+                 len(symbols),assessed,eligible,delivered,len(failures),duration,json.dumps(reasons,sort_keys=True))
         self.long_context_tick(symbols,now_ms)
-        if not self.cfg.dry_run:
-            track_signals(self.cfg.database_url,self.client,now_ms=int(time.time()*1000),initialize=False)
-            self.journal.settle_primary(self.client,int(time.time()*1000))
         return delivered
+
+    def standard_decision(self, signal, now_ms, reason):
+        if hasattr(self,'standard_decisions'):
+            self.standard_decisions.append(dict(symbol=signal.symbol,side=signal.side,
+                strategy=signal.strategy_version,reason=reason,
+                quality_score=getattr(signal,'quality_score',None)))
+        self.journal.decision(signal,'primary',now_ms,reason)
+
+    def standard_maintenance(self,now_ms):
+        if self.cfg.dry_run:
+            return
+        track_signals(self.cfg.database_url,self.client,now_ms=now_ms,initialize=False)
+        self.journal.settle_primary(self.client,now_ms)
+        self.journal.track_shadows(self.client,now_ms)
+        from .forward_report import maintain_reports
+        maintain_reports(self,now_ms)
 
     def long_context_tick(self,symbols,now_ms):
         """Sample 4h/daily context at UTC close +5m, retrying delayed data."""
@@ -494,31 +552,47 @@ class Runner:
 
     def deliver(self,signals,cohort,now_ms):
         cfg=self.cfg
+        def record_decision(s,stamp,reason):
+            if cfg.primary_strategy=='standard' and cohort=='primary':
+                self.standard_decision(s,stamp,reason)
+            else:
+                self.journal.decision(s,cohort,stamp,reason)
         delivery_started_ms=int(time.time()*1000)
         if cohort=='primary' and self.journal.pending_delivery():
+            for candidate in signals:
+                record_decision(candidate,delivery_started_ms,'delivery_uncertain')
             log.error('delivery_uncertain_primary_paused reconciliation_required=true')
             return 0
         peers=self.journal.active(cohort)
         sent=0
         recent=self.journal.recent_count(cohort,delivery_started_ms)
-        for s in sorted(signals,key=lambda s:(s.score,s.rvol),reverse=True):
+        pro=enhanced(cfg) and cohort=='primary'
+        daily_loss=self.journal.daily_loss_pct(delivery_started_ms,cfg.timezone) if pro else 0
+        for s in sorted(signals,key=lambda s:(-getattr(s,'quality_score',s.score),-s.rvol,s.symbol,s.strategy_version)):
             if sent+recent>=cfg.max_signals_per_run or len(peers)>=cfg.max_open_signals:
-                self.journal.decision(s,cohort,delivery_started_ms,'exposure_or_rate_limit')
+                record_decision(s,delivery_started_ms,'exposure_or_rate_limit')
                 continue
             if any(p['symbol']==s.symbol for p in peers):
-                self.journal.decision(s,cohort,delivery_started_ms,'symbol_already_active')
+                record_decision(s,delivery_started_ms,'symbol_already_active')
                 continue
             minutes=(cfg.cooldown_minutes if cfg.primary_strategy=='standard'
                      else max(cfg.cooldown_minutes,240 if s.side=='SHORT' else 180))
             if cohort=='primary':
                 if not self.storage.allowed(s.symbol,s.side,minutes):
-                    self.journal.decision(s,cohort,delivery_started_ms,'cooldown')
+                    record_decision(s,delivery_started_ms,'cooldown')
                     continue
             elif not self.journal.cooldown(cohort,s,minutes,delivery_started_ms):
-                self.journal.decision(s,cohort,delivery_started_ms,'cooldown')
+                record_decision(s,delivery_started_ms,'cooldown')
                 continue
+            if pro:
+                reserved=sum((p.get('journal_json') or {}).get('risk_pct',.5) for p in peers)
+                reason=('daily_loss_limit' if daily_loss+reserved+cfg.risk_per_trade_pct>cfg.daily_loss_limit_pct+1e-9
+                        else exposure(s,peers,self.snapshots,cfg))
+                if reason:
+                    self.standard_decision(s,delivery_started_ms,reason)
+                    continue
             if s.strategy_version=='v3' and correlated(s,peers,self.snapshots,cfg.correlation_threshold):
-                self.journal.decision(s,cohort,delivery_started_ms,'correlation')
+                record_decision(s,delivery_started_ms,'correlation')
                 continue
             # Fresh quote directly before each delivery; never reuse scan book.
             quote_started=time.monotonic()
@@ -538,15 +612,21 @@ class Runner:
                           if research.get('evaluation_completed_ms') is not None else None),
                          quote_fetch_ms,decision-int(book['time']) if book.get('time') is not None else None)
             if reason:
-                self.journal.decision(s,cohort,decision,reason)
+                record_decision(s,decision,reason)
                 continue
+            if pro:
+                rank(s,self.snapshots[s.symbol],self.snapshots,peers,cfg)
+                log.info('standard_selected symbol=%s strategy=%s quality=%.2f regime=%s net_tp1_rr=%.3f components=%s',
+                         s.symbol,s.strategy_version,s.quality_score,s.journal['regime'],s.journal['estimated_net_tp1_rr'],json.dumps(s.journal['quality_components'],sort_keys=True))
             if not self.journal.claim(cohort,s,decision):
-                self.journal.decision(s,cohort,decision,'setup_already_used')
+                record_decision(s,decision,'setup_already_used')
                 continue
+            paired_stamp=decision
             if cohort=='primary' and not cfg.dry_run:
                 try:
                     send_telegram(cfg.telegram_token,cfg.telegram_chat_id,format_signal(s,cfg.timezone))
-                    self.storage.mark_sent(s.symbol,s.side,signal=s)
+                    paired_stamp=int(time.time()*1000)
+                    self.storage.mark_sent(s.symbol,s.side,signal=s,sent_at_ms=paired_stamp)
                     self.journal.delivery(cohort,s,'sent')
                 except Exception:
                     # Telegram cannot guarantee idempotent delivery. An uncertain
@@ -558,8 +638,10 @@ class Runner:
                 self.journal.add_shadow(cohort,s,decision)
                 if cfg.dry_run:
                     log.info('DRY_RUN cohort=%s symbol=%s side=%s',cohort,s.symbol,s.side)
-            peers.append(dict(symbol=s.symbol,side=s.side))
-            self.journal.decision(s,cohort,decision,'sent' if cohort=='primary' and not cfg.dry_run else 'paper_recorded')
+            peers.append(dict(symbol=s.symbol,side=s.side,journal_json=s.journal))
+            if pro and cfg.standard_exit_shadows:
+                self.journal.add_standard_shadows(s,paired_stamp)
+            record_decision(s,decision,'sent' if cohort=='primary' and not cfg.dry_run else 'paper_recorded')
             sent+=1
         return sent
 
@@ -581,6 +663,11 @@ def main():
             raise RuntimeError('another_worker_holds_lock')
         log.info('worker_started primary=%s shadow=%s continuous=%s symbols=%d',
                  cfg.primary_strategy,cfg.shadow_enabled,cfg.continuous,len(cfg.symbols))
+        if cfg.primary_strategy=='standard':
+            log.info('standard_operating_config enhanced=%s regime_filter=%s risk_pct=%.2f total_risk_pct=%.2f correlated_risk_pct=%.2f daily_loss_pct=%.2f hold_minutes=%d daily_summary=%s report_hour=%d timezone=%s',
+                     cfg.standard_enhanced,cfg.regime_filter_mode,cfg.risk_per_trade_pct,cfg.max_total_risk_pct,
+                     cfg.max_correlated_risk_pct,cfg.daily_loss_limit_pct,cfg.max_hold_minutes,
+                     cfg.daily_summary_enabled,cfg.daily_summary_hour,cfg.timezone)
         failures=0
         while not stop.is_set():
             started=time.time()

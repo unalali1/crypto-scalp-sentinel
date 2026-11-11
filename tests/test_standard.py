@@ -152,7 +152,7 @@ class StandardTests(unittest.TestCase):
                 return [[0,'100','101','99','100','10',1]]*60
         client=Client()
         settings=replace(config(),primary_strategy='standard',symbols=('TEST',),
-                         shadow_enabled=False,fee_bps=0,slippage_bps=0)
+                         shadow_enabled=False,fee_bps=0,slippage_bps=0,standard_enhanced=False)
         runner=Runner(settings,client)
         try:
             with patch('scalp_sentinel.main.time.time',return_value=now/1000),\

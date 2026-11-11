@@ -63,6 +63,16 @@ historical coverage, listing dates, checksum and funding availability must be
 verified before any 2020–24 point-in-time claim. A missing symbol or 1m segment
 is not a zero-return trade. Track BTC daily trend veto counts by direction.
 
+## Standard forward cohorts (11 November 2026)
+
+Apply this unchanged protocol separately to EMA pullback and breakout/retest,
+including the standard-v2 revision. Do not pool legacy cost assumptions with
+paper-v2 or treat paired 30/60-minute and delayed-market comparisons as
+independent alerts. Count all additional tested strategy/exit/entry hypotheses
+in the familywise denominator; the historical default of seven is not valid
+for a claim based on these extra cohorts. No ranking score implies promotion.
+The rollout is an operational paper measurement upgrade, not evidence of profit.
+
 ## Decision record
 
 Publish the sample window, frozen code commit, attempted-cohort count, every

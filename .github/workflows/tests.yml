@@ -8,6 +8,20 @@ on:
 jobs:
   unittest:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: scalp_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test -d scalp_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://test:test@localhost:5432/scalp_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

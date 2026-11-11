@@ -2,12 +2,20 @@
 from math import isfinite
 
 from .engine import Signal, atr, candles, ema, price_round
+from .standard_quality import enhanced, regime_context
 
 
 FIVE_MINUTES = 300_000
 
 
 def assess(symbol, snapshot, tick_size, cfg):
+    pro = enhanced(cfg)
+    if pro and snapshot.get('asof_ms') is not None:
+        for tf, duration in (('5m', 300000), ('15m', 900000)):
+            rows = snapshot[tf]
+            now = snapshot['asof_ms']
+            if any(int(r[6])+250 > now for r in rows) or int(rows[-1][0]) != now//duration*duration-duration:
+                raise ValueError('unclosed_or_stale_candles')
     five = candles(snapshot["5m"])
     fifteen = candles(snapshot["15m"])
     if len(five) < 60 or len(fifteen) < 60:
@@ -42,10 +50,17 @@ def assess(symbol, snapshot, tick_size, cfg):
         # A touch of the 21 EMA, followed by a closed candle back across the 9 EMA.
         touched = any(bar.l <= prev21 if sign == 1 else bar.h >= prev21
                       for bar in five[-3:])
+        if pro:
+            averages = ema(closes, 21)
+            touched = any(bar.l <= average+.15*a5 and bar.h >= average-.15*a5
+                          for bar, average in zip(five[-4:-1], averages[-4:-1]))
         pullback = (touched and sign * (five[-2].c - prev9) <= 0
                     and sign * (five[-1].c - e9) > 0)
         pull_checks = {"15m trend": trend, "5m EMA alignment": alignment,
                        "21 EMA pullback": pullback, "closed 5m reaction": confirmation}
+        if pro:
+            pull_checks['controlled pullback'] = (abs(five[-1].c-e21) <= 1.5*a5
+                and max(b.h-b.l for b in five[-4:]) <= 3*a5)
         output.append(_signal(symbol, side, "ema-pullback", five, a5, rvol,
                               spread, tick_size, cfg, pull_checks,
                               "15m EMA trend; 5m EMA21 pullback and EMA9 reclaim"))
@@ -58,6 +73,23 @@ def assess(symbol, snapshot, tick_size, cfg):
         retest = (five[-1].l <= level <= five[-1].c if sign == 1
                   else five[-1].c <= level <= five[-1].h)
         close_near = sign * (five[-1].c - level) <= 1.5 * a5
+        if pro:
+            # Freeze the level and volume baseline before each breakout.
+            # Allow up to three subsequent candles to retest it.
+            broke = retest = close_near = False
+            for index in range(len(five)-2, len(five)-5, -1):
+                prior = five[index-12:index]
+                candidate_level = max(b.h for b in prior) if sign == 1 else min(b.l for b in prior)
+                volume = sum(b.v for b in five[index-20:index])/20
+                b = five[index]
+                broke_here = sign*(b.c-candidate_level)>0 and b.v >= cfg.breakout_rvol*volume
+                held = all(sign*(x.c-candidate_level) >= -.15*a5 for x in five[index+1:])
+                test = (five[-1].l <= candidate_level+.15*a5 and five[-1].c > candidate_level
+                        if sign == 1 else five[-1].h >= candidate_level-.15*a5 and five[-1].c < candidate_level)
+                if broke_here and held and test:
+                    level, broke, retest = candidate_level, True, True
+                    close_near = abs(five[-1].c-level) <= a5
+                    break
         breakout_checks = {"15m trend": trend, "volume breakout": broke,
                            "closed 5m retest": retest and close_near,
                            "closed 5m reaction": confirmation}
@@ -65,6 +97,19 @@ def assess(symbol, snapshot, tick_size, cfg):
                               spread, tick_size, cfg, breakout_checks,
                               "15m EMA trend; volume breakout and 5m level retest",
                               level=level))
+    if pro:
+        context = regime_context(snapshot)
+        for signal in output:
+            signal.research = dict(context, strategy_revision='standard-v2')
+            # Predeclared extreme-volatility safety pause, independent of the
+            # unvalidated TREND/RANGE ranking hypothesis.
+            signal.checks['extreme volatility pause'] = context['shock_ratio'] < 6
+            signal.eligible = all(signal.checks.values())
+            signal.score = sum(signal.checks.values())
+            if cfg.regime_filter_mode == 'enforce':
+                signal.checks['market regime'] = context['regime'] == 'TREND'
+                signal.eligible = all(signal.checks.values())
+                signal.score = sum(signal.checks.values())
     return output, []
 
 
