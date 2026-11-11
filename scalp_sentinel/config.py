@@ -47,9 +47,6 @@ class Config:
     regime_filter_mode: str = "shadow"
     scan_budget_seconds: int = 45
     risk_per_trade_pct: float = .35
-    max_total_risk_pct: float = 1.0
-    max_correlated_risk_pct: float = .5
-    daily_loss_limit_pct: float = 2.0
     standard_exit_shadows: bool = True
     daily_summary_enabled: bool = False
     daily_summary_hour: int = 8
@@ -66,10 +63,6 @@ class Config:
             raise ValueError("Invalid scan/report timing")
         if not .25 <= self.risk_per_trade_pct <= .5:
             raise ValueError("RISK_PER_TRADE_PCT must be .25 to .50")
-        if not self.risk_per_trade_pct <= self.max_correlated_risk_pct <= self.max_total_risk_pct <= 2:
-            raise ValueError("Invalid aggregate risk limits")
-        if not 0 < self.daily_loss_limit_pct <= 2:
-            raise ValueError("Invalid daily loss limit")
         if self.primary_strategy not in ("v2.1", "v3", "standard"):
             raise ValueError("PRIMARY_STRATEGY must be v2.1, v3 or standard")
         if self.score_threshold not in (5,6) or self.min_stop_atr <= 0 or self.max_stop_atr < self.min_stop_atr:
@@ -128,9 +121,6 @@ class Config:
             regime_filter_mode=os.getenv("REGIME_FILTER_MODE", "shadow"),
             scan_budget_seconds=int(os.getenv("SCAN_BUDGET_SECONDS", 45)),
             risk_per_trade_pct=float(os.getenv("RISK_PER_TRADE_PCT", .35)),
-            max_total_risk_pct=float(os.getenv("MAX_TOTAL_RISK_PCT", 1)),
-            max_correlated_risk_pct=float(os.getenv("MAX_CORRELATED_RISK_PCT", .5)),
-            daily_loss_limit_pct=float(os.getenv("DAILY_LOSS_LIMIT_PCT", 2)),
             standard_exit_shadows=bool_env("STANDARD_EXIT_SHADOWS", True),
             daily_summary_enabled=bool_env("DAILY_SUMMARY_ENABLED", False),
             daily_summary_hour=int(os.getenv("DAILY_SUMMARY_HOUR", 8)),

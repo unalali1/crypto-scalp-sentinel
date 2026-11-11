@@ -6,7 +6,8 @@ from unittest.mock import patch, Mock
 from types import SimpleNamespace
 from scalp_sentinel.config import Config
 from scalp_sentinel.standard import assess
-from scalp_sentinel.standard_quality import rank, exposure, regime_context, risk_plan
+from scalp_sentinel.standard_quality import rank, regime_context, risk_plan
+from scalp_sentinel.notifier import format_signal
 from scalp_sentinel.execution import prepare
 from scalp_sentinel.journal import Journal, paper_trade
 from scalp_sentinel.tracker import advance_trade
@@ -88,12 +89,29 @@ class StandardForward(unittest.TestCase):
         self.assertAlmostEqual(score,sum(s.journal['quality_components'].values()),places=1)
         self.assertEqual(score,rank(s,data,{'TEST':data,'BTCUSDT':data},[],settings()))
 
-    def test_correlated_risk_and_missing_peer_are_blocked(self):
-        s=signal(); data=snap()
-        peer=dict(symbol='OTHER',side='LONG',journal_json={'risk_pct':.35})
-        self.assertEqual(exposure(s,[peer],{'TEST':data,'OTHER':data},settings()),'correlated_risk_limit')
-        self.assertEqual(exposure(s,[peer],{'TEST':data},settings()),'correlation_data_missing')
-        self.assertEqual(exposure(s,[peer,dict(peer,symbol='THIRD')],{'TEST':data},settings()),'total_risk_limit')
+    def test_paper_history_never_blocks_independent_ideas(self):
+        cfg=settings(max_open_signals=1,max_signals_per_run=1,standard_exit_shadows=False)
+        r=Runner(cfg,SimpleNamespace(get=lambda *_a,**_kw:snap()['book']))
+        r.snapshots={'TEST':snap(),'CORRELATED':snap()}
+        try:
+            r.journal.memory_trades=[
+                dict(cohort='primary',symbol=sym,side='LONG',status='OPEN',sent_at_ms=NOW-1000,
+                     journal_json={'risk_pct':1}) for sym in ('TEST','CORRELATED','MISSING')]
+            r.journal.memory_trades.extend(
+                dict(cohort='primary',symbol='OLD',side='LONG',status='STOPPED',sent_at_ms=NOW-600000,
+                     finished_at_ms=NOW-1000,journal_json={'costs_complete':complete,'risk_pct':.5,'net_r_low':-20})
+                for complete in (True,False))
+            first=signal(); second=signal(); second.setup_id+=':new-pattern'
+            with patch('scalp_sentinel.main.time.time',return_value=NOW/1000), \
+                 patch.object(r.storage,'allowed',side_effect=AssertionError('No account cooldown for ideas')), \
+                 patch.object(r.journal,'recent_count',side_effect=AssertionError('No idea quota')):
+                self.assertEqual(r.deliver([first,second],'primary',NOW),2)
+                self.assertEqual(r.deliver([signal()],'primary',NOW),0)
+            self.assertEqual(len(r.journal.memory_trades),7)
+            for trade in r.journal.memory_trades[-2:]:
+                self.assertTrue(trade['journal_json']['advisory_only'])
+                self.assertEqual(trade['journal_json']['notification_policy'],'independent-ideas-v1')
+        finally:r.close()
 
     def test_risk_sizes_without_account_balance_and_margin_scales_correctly(self):
         p=risk_plan(100,99,.1,settings())
@@ -170,7 +188,7 @@ class StandardForward(unittest.TestCase):
         self.assertEqual(report['active'],1)
         self.assertIn('Sanal',format_digest('test',report))
 
-    def test_late_best_candidate_wins_global_ranking(self):
+    def test_all_valid_candidates_are_recorded_in_quality_order(self):
         cfg=settings(symbols=('A','Z'),max_signals_per_run=1,standard_exit_shadows=False)
         data=snap()
         class Client:
@@ -190,16 +208,27 @@ class StandardForward(unittest.TestCase):
         r=Runner(cfg,Client())
         try:
             with patch('scalp_sentinel.main.time.time',return_value=NOW/1000),patch('scalp_sentinel.main.assess_standard',side_effect=assess_one),patch('scalp_sentinel.main.rank',side_effect=ranking),patch('scalp_sentinel.main.as_completed',side_effect=lambda jobs,**kw:iter(reversed(list(jobs)))):
-                self.assertEqual(r.tick(NOW),1)
-                self.assertEqual(r.journal.memory_trades[0]['symbol'],'A')
+                self.assertEqual(r.tick(NOW),2)
+                self.assertEqual([t['symbol'] for t in r.journal.memory_trades],['A','Z'])
                 self.assertEqual(r.tick(NOW+60000),0)
-                self.assertEqual(len(r.journal.memory_trades),1)
+                self.assertEqual(len(r.journal.memory_trades),2)
         finally:r.close()
 
-    def test_daily_limit_reserves_active_risk_and_incomplete_losses(self):
-        j=Journal()
-        j.memory_trades=[dict(cohort='primary',finished_at_ms=NOW,journal_json={'costs_complete':False,'risk_pct':.35,'net_r_low':.5})]
-        self.assertAlmostEqual(j.daily_loss_pct(NOW,'Asia/Shanghai'),.35)
+    def test_idea_message_has_no_account_loss_or_portfolio_limit(self):
+        s=signal(); prepare(s,snap()['book'],NOW,settings())
+        rank(s,snap(),{'TEST':snap()},[],settings())
+        message=format_signal(s,'Asia/Shanghai')
+        self.assertIn('İşlem fikri',message)
+        self.assertIn('sanal olarak izlenir',message)
+        self.assertNotIn('günlük zarar sınırı',message)
+        self.assertNotIn('Toplam risk sınırı',message)
+        self.assertNotIn('daily_loss_limit_pct',s.journal)
+
+    def test_retired_daily_limit_environment_cannot_reenable_gate(self):
+        with patch.dict('os.environ',{'PRIMARY_STRATEGY':'standard','DAILY_LOSS_LIMIT_PCT':'0'},clear=True):
+            cfg=Config.from_env()
+        cfg.validate()
+        self.assertFalse(hasattr(cfg,'daily_loss_limit_pct'))
 
     def test_rate_limit_cooldown_avoids_retry_storm(self):
         c=BinanceClient('https://example.invalid')

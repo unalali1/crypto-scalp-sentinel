@@ -20,8 +20,12 @@ exchange orders. `DRY_RUN=true` skips Telegram and PostgreSQL persistence.
 The standard mode defaults to a 45-minute maximum paper hold and a 0.40R
 round-trip cost cap (both configurable), with 1.5R/2.5R targets and break-even
 tracking after TP1. Shared quote freshness, spread, liquidity, price drift and
-deduplication gates still apply. `COOLDOWN_MINUTES` applies without the legacy
-three/four-hour floor. The old replay archive is not written in this mode,
+deduplication gates still apply. Standard alerts are independent trading ideas:
+paper losses, open paper positions, aggregate/correlated exposure, signal quotas
+and account-style cooldowns do not suppress new qualifying setups. Each distinct
+setup is sent once and tracked hypothetically; the user chooses whether to trade.
+`COOLDOWN_MINUTES`, `MAX_OPEN_SIGNALS` and `MAX_SIGNALS_PER_RUN` apply to legacy
+paths, not standard primary ideas. The old replay archive is not written in this mode,
 which prevents its unbounded disk growth. Existing archive rows require
 separate, deliberate database cleanup.
 

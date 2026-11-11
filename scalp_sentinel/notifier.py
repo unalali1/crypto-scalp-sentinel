@@ -70,6 +70,7 @@ def format_standard_signal(s,tz):
     reason=('15dk EMA21/50 trendi, 5dk EMA21 geri çekilmesi ve kapanmış tepki mumu.'
             if s.strategy_version=='ema-pullback' else 'Hacimle kırılan seviyeye geri test ve kapanmış teyit mumu.')
     lines=[f'{title} | {s.symbol} | {strategy}',
+        'İşlem fikri • Sonucu sanal olarak izlenir; işleme girip girmemek size aittir.',
         f"Kalite: {p.get('quality_score',0):.1f}/100 (kazanma olasılığı değildir) | Rejim: {p.get('regime','?')}",
         reason,'',f'Limit giriş referansı: {price(s.entry)} USDT',
         f"Güncel bid / ask: {price(p['bid'])} / {price(p['ask'])}",
@@ -81,10 +82,9 @@ def format_standard_signal(s,tz):
         f"Spread: {p['spread_bps']:.2f} bp | Tahmini maliyet: {p['estimated_cost_r']:.3f}R (funding hariç)",
         f"Maliyet sonrası TP1 ödül/risk: {p['estimated_net_tp1_rr']:.2f}",
         f"Piyasa giriş senaryosu: {price(p['market_scenario']['entry'])}; limit girişten ayrı değerlendirilir.",
-        '',f"Örnek toplam zarar bütçesi: hesap özkaynağının %{p['risk_pct']:.2f}'i.",
+        '',f"Yalnızca boyutlandırma örneği: varsayımsal özkaynağın %{p['risk_pct']:.2f}'i risk kabul edilirse:",
         f"Pozisyon nominali ≈ özkaynak × {p['notional_equity_multiple']:.3f}.",
         f"Başlangıç teminatı: 10x için özkaynağın %{p['margin_equity_pct']['10']:.2f}'i; 15x için %{p['margin_equity_pct']['15']:.2f}'i.",
-        f"Toplam risk sınırı %{p['total_risk_limit_pct']:g}; ilişkili risk %{p['correlated_risk_limit_pct']:g}; günlük zarar sınırı %{p['daily_loss_limit_pct']:g}.",
         'Otomatik emir değildir. Limit gerçekleşmesi garanti değildir. Ücret, funding ve fiyat boşlukları örnek risk bütçesini aşabilir.']
     return '\n'.join(lines)
 
