@@ -25,26 +25,6 @@ def regime_context(snapshot):
                 shock_ratio=shock_ratio, regime_would_block=label != 'TREND')
 
 
-def exposure(signal, peers, snapshots, cfg):
-    """Reserve suggested risk even for unfilled orders; no hedge-netting credit."""
-    own = cfg.risk_per_trade_pct
-    total = own + sum((p.get('journal_json') or {}).get('risk_pct', .5) for p in peers)
-    if total > cfg.max_total_risk_pct + 1e-9:
-        return 'total_risk_limit'
-    linked = own
-    series = return_series(snapshots[signal.symbol])
-    for peer in peers:
-        snap = snapshots.get(peer['symbol'])
-        if not snap:
-            return 'correlation_data_missing'
-        corr = correlation(series, return_series(snap))
-        if corr is None:
-            return 'correlation_data_missing'
-        if corr * (1 if signal.side == peer['side'] else -1) >= cfg.correlation_threshold:
-            linked += (peer.get('journal_json') or {}).get('risk_pct', .5)
-    return 'correlated_risk_limit' if linked > cfg.max_correlated_risk_pct + 1e-9 else None
-
-
 def rank(signal, snapshot, snapshots, peers, cfg):
     p = signal.journal
     context = regime_context(snapshot)
@@ -99,9 +79,7 @@ def risk_plan(entry, stop, cost_r, cfg):
     """Risk budget includes modeled stop costs. No invented account balance."""
     distance = abs(entry-stop)/entry
     multiple = (cfg.risk_per_trade_pct/100)/(distance*(1+cost_r))
-    return dict(risk_pct=cfg.risk_per_trade_pct, total_risk_limit_pct=cfg.max_total_risk_pct,
-                correlated_risk_limit_pct=cfg.max_correlated_risk_pct,
-                daily_loss_limit_pct=cfg.daily_loss_limit_pct,
+    return dict(risk_pct=cfg.risk_per_trade_pct, advisory_only=True,
                 notional_equity_multiple=multiple,
                 margin_equity_pct={str(l):100*multiple/l for l in (10, 15)},
                 risk_note='Illustrative equity proportions; costs/funding/gaps can exceed budget')

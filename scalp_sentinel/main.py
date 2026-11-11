@@ -20,7 +20,7 @@ from .price_zones import (detect_price_zones, nearby_zone_alert,
 from .storage import Cooldowns
 from .tracker import track_signals
 from .standard import assess as assess_standard
-from .standard_quality import enhanced, rank, exposure
+from .standard_quality import enhanced, rank
 
 log=logging.getLogger('sentinel')
 
@@ -565,32 +565,27 @@ class Runner:
             return 0
         peers=self.journal.active(cohort)
         sent=0
-        recent=self.journal.recent_count(cohort,delivery_started_ms)
+        # Standard signals are independent ideas, not positions in the user's
+        # account. Paper outcomes must never throttle subsequent suggestions.
+        advisory=cfg.primary_strategy=='standard' and cohort=='primary'
+        recent=0 if advisory else self.journal.recent_count(cohort,delivery_started_ms)
         pro=enhanced(cfg) and cohort=='primary'
-        daily_loss=self.journal.daily_loss_pct(delivery_started_ms,cfg.timezone) if pro else 0
         for s in sorted(signals,key=lambda s:(-getattr(s,'quality_score',s.score),-s.rvol,s.symbol,s.strategy_version)):
-            if sent+recent>=cfg.max_signals_per_run or len(peers)>=cfg.max_open_signals:
+            if not advisory and (sent+recent>=cfg.max_signals_per_run or len(peers)>=cfg.max_open_signals):
                 record_decision(s,delivery_started_ms,'exposure_or_rate_limit')
                 continue
-            if any(p['symbol']==s.symbol for p in peers):
+            if not advisory and any(p['symbol']==s.symbol for p in peers):
                 record_decision(s,delivery_started_ms,'symbol_already_active')
                 continue
             minutes=(cfg.cooldown_minutes if cfg.primary_strategy=='standard'
                      else max(cfg.cooldown_minutes,240 if s.side=='SHORT' else 180))
-            if cohort=='primary':
+            if cohort=='primary' and not advisory:
                 if not self.storage.allowed(s.symbol,s.side,minutes):
                     record_decision(s,delivery_started_ms,'cooldown')
                     continue
-            elif not self.journal.cooldown(cohort,s,minutes,delivery_started_ms):
+            elif cohort!='primary' and not self.journal.cooldown(cohort,s,minutes,delivery_started_ms):
                 record_decision(s,delivery_started_ms,'cooldown')
                 continue
-            if pro:
-                reserved=sum((p.get('journal_json') or {}).get('risk_pct',.5) for p in peers)
-                reason=('daily_loss_limit' if daily_loss+reserved+cfg.risk_per_trade_pct>cfg.daily_loss_limit_pct+1e-9
-                        else exposure(s,peers,self.snapshots,cfg))
-                if reason:
-                    self.standard_decision(s,delivery_started_ms,reason)
-                    continue
             if s.strategy_version=='v3' and correlated(s,peers,self.snapshots,cfg.correlation_threshold):
                 record_decision(s,delivery_started_ms,'correlation')
                 continue
@@ -618,6 +613,8 @@ class Runner:
                 rank(s,self.snapshots[s.symbol],self.snapshots,peers,cfg)
                 log.info('standard_selected symbol=%s strategy=%s quality=%.2f regime=%s net_tp1_rr=%.3f components=%s',
                          s.symbol,s.strategy_version,s.quality_score,s.journal['regime'],s.journal['estimated_net_tp1_rr'],json.dumps(s.journal['quality_components'],sort_keys=True))
+            if advisory:
+                s.journal.update(advisory_only=True,notification_policy='independent-ideas-v1')
             if not self.journal.claim(cohort,s,decision):
                 record_decision(s,decision,'setup_already_used')
                 continue
@@ -664,9 +661,8 @@ def main():
         log.info('worker_started primary=%s shadow=%s continuous=%s symbols=%d',
                  cfg.primary_strategy,cfg.shadow_enabled,cfg.continuous,len(cfg.symbols))
         if cfg.primary_strategy=='standard':
-            log.info('standard_operating_config enhanced=%s regime_filter=%s risk_pct=%.2f total_risk_pct=%.2f correlated_risk_pct=%.2f daily_loss_pct=%.2f hold_minutes=%d daily_summary=%s report_hour=%d timezone=%s',
-                     cfg.standard_enhanced,cfg.regime_filter_mode,cfg.risk_per_trade_pct,cfg.max_total_risk_pct,
-                     cfg.max_correlated_risk_pct,cfg.daily_loss_limit_pct,cfg.max_hold_minutes,
+            log.info('standard_operating_config advisory_only=true daily_loss_gate=false portfolio_gates=false paper_cooldown=false signal_cap=false enhanced=%s regime_filter=%s illustrative_risk_pct=%.2f hold_minutes=%d daily_summary=%s report_hour=%d timezone=%s',
+                     cfg.standard_enhanced,cfg.regime_filter_mode,cfg.risk_per_trade_pct,cfg.max_hold_minutes,
                      cfg.daily_summary_enabled,cfg.daily_summary_hour,cfg.timezone)
         failures=0
         while not stop.is_set():

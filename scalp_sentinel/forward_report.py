@@ -12,7 +12,7 @@ log=logging.getLogger('sentinel.forward')
 
 
 def summarize_window(trades, scans, start, end):
-    # Signal cohort; a separate realized-loss guard uses exit dates.
+    # Recommendations grouped by signal date, not actual account executions.
     selected=[t for t in trades if start <= t['sent_at_ms'] < end]
     rows=[dict(t, strategy_version=t['strategy_version']+'/'+
                (t.get('journal_json') or {}).get('strategy_revision','legacy')) for t in selected]

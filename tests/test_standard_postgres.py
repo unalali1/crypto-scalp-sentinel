@@ -1,5 +1,6 @@
 """Real PostgreSQL isolation, restart and at-most-once notification regression."""
 import os
+import copy
 import uuid
 import unittest
 from types import SimpleNamespace
@@ -44,6 +45,11 @@ class PostgresForward(unittest.TestCase):
             c.mark_sent(s.symbol,s.side,s)
         self.assertFalse(j.pending_delivery())
         j.record_standard_scan(NOW,dict(symbols=1,eligible=1,assessed=1,delivered=1,failed=0,decisions=[],reasons={}))
+        # Reproduce the production legacy key with an existing outcome. The
+        # next connection must migrate it without losing history or claims.
+        c.conn.execute('ALTER TABLE scalp_signal_outcomes DROP CONSTRAINT scalp_outcomes_setup_key')
+        c.conn.execute('ALTER TABLE scalp_signal_outcomes ADD CONSTRAINT scalp_signal_outcomes_symbol_side_signal_ts_key UNIQUE(symbol,side,signal_ts)')
+        c.conn.commit()
         c2=self.storage(); j2=Journal(c2.conn)
         self.assertFalse(j2.lock())
         self.assertFalse(j2.claim('primary',s,NOW))
@@ -69,6 +75,35 @@ class PostgresForward(unittest.TestCase):
         row=c2.conn.execute('SELECT delivery FROM scalp_daily_reports').fetchone()
         self.assertEqual(row[0],'uncertain')
         c2.conn.commit()
+
+    def test_independent_ideas_persist_after_losses_open_peer_and_restart(self):
+        cfg=settings(database_url=self.dsn,dry_run=False,telegram_token='test',telegram_chat_id='test',
+                     max_open_signals=1,max_signals_per_run=1,standard_exit_shadows=False)
+        client=SimpleNamespace(get=lambda *_a,**_kw:snap()['book'])
+        r=Runner(cfg,client); self.resources.append(r)
+        r.snapshots={'TEST':snap()}
+        loss=signal(symbol='OLD'); prepare(loss,snap()['book'],NOW,settings())
+        r.storage.mark_sent(loss.symbol,loss.side,loss,sent_at_ms=NOW-600000)
+        r.storage.conn.execute("""UPDATE scalp_signal_outcomes SET status='STOPPED',finished_at_ms=%s,
+            journal_json=journal_json || '{"net_r_low":-20,"costs_complete":true}'::jsonb
+            WHERE symbol='OLD'""",(NOW-1000,))
+        r.storage.conn.commit()
+        first=signal(); second=signal()
+        second.strategy_version='breakout-retest'
+        second.setup_id=second.setup_id.replace('ema-pullback','breakout-retest')
+        with patch('scalp_sentinel.main.send_telegram') as send:
+            with patch('scalp_sentinel.main.time.time',return_value=NOW/1000):
+                self.assertEqual(r.deliver([copy.deepcopy(first)],'primary',NOW),1)
+            r2=Runner(cfg,client); self.resources.append(r2)
+            r2.snapshots={'TEST':snap()}
+            with patch('scalp_sentinel.main.time.time',return_value=(NOW+1000)/1000):
+                self.assertEqual(r2.deliver([copy.deepcopy(first),second],'primary',NOW+1000),1)
+            self.assertEqual(send.call_count,2)
+        rows=r2.storage.conn.execute("SELECT journal_json->>'setup_id',status FROM scalp_signal_outcomes WHERE symbol='TEST'").fetchall()
+        r2.storage.conn.commit()
+        self.assertEqual({row[0] for row in rows},{first.setup_id,second.setup_id})
+        self.assertTrue(all(row[1]=='AWAITING_ENTRY' for row in rows))
+        self.assertEqual(read_window(r2.storage.conn,NOW-1,NOW+1001)['sent'],2)
 
     def test_uncertain_primary_delivery_never_retried_after_restart(self):
         cfg=settings(database_url=self.dsn,dry_run=False,telegram_token='test',telegram_chat_id='test',
