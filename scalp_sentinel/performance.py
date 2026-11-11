@@ -30,6 +30,12 @@ def outcome_bounds(trade, close):
     # Explicit estimated notional-cost allowance on both sides. Funding
     # is resolved separately from exchange history, never silently assumed 0.
     cost = 2 * (p.get("fee_bps", 5) + p.get("slippage_bps", 2)) / 10000 * entry / risk
+    if p.get('cost_model') == 'paper-v2':
+        # Gross R already contains the delayed market entry friction, if any.
+        # Weighted exit notional follows from the price-only gross return.
+        # For ambiguous exits charge the larger notional to both bounds.
+        exit_notional=max(entry+side*low*risk,entry+side*high*risk)
+        cost=(entry*p['fee_bps']+exit_notional*(p['fee_bps']+p['exit_friction_bps']))/10000/risk
     return {"gross_r_low": low, "gross_r_high": high,
             "execution_cost_r": cost, "net_r_low": low-cost,
             "net_r_high": high-cost, "costs_complete": False}
@@ -93,6 +99,9 @@ def summarize(trades):
         result.append(dict(version=key[0], symbol=key[1], side=key[2], regime=key[3],
             signals=len(rows), filled=sum(t.get("filled_at_ms") is not None for t in rows),
             resolved=len(low), no_entry=len(no_entry), decision_count=decided,
+            no_entry_rate=len(no_entry)/len(rows) if rows else None,
+            confirmed_net_wins=sum(t['journal_json']['net_r_low']>0 and 'AMBIGUOUS' not in t['status'] for t in closed),
+            pending_or_incomplete=len(rows)-decided,
             mean_net_r_per_alert_low=sum(low)/decided if decided else None,
             mean_net_r_per_alert_high=sum(high)/decided if decided else None,
             ambiguous=sum("AMBIGUOUS" in t["status"] for t in rows),

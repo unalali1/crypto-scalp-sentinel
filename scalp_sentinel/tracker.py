@@ -7,6 +7,7 @@ No orders or private exchange endpoints are used.
 import json
 import logging
 import time
+from math import isfinite
 
 log = logging.getLogger("sentinel.tracker")
 MINUTE = 60_000
@@ -112,9 +113,30 @@ def advance_trade(trade, candles):
             raise ValueError(f"noncontiguous 1m candles, expected {expected}, got {opened}")
         expected += MINUTE
         high, low = float(candle[2]), float(candle[3])
-        if low > high or low <= 0:
+        if not all(isfinite(x) for x in (low,high)) or low > high or low <= 0:
             raise ValueError("invalid 1m candle")
         state = trade["status"]
+        if policy.get('cost_model')=='paper-v2':
+            opening, closing = float(candle[1]), float(candle[4])
+            if not all(isfinite(x) for x in (opening,closing)) or not low<=min(opening,closing)<=max(opening,closing)<=high:
+                raise ValueError('invalid 1m OHLC')
+            if state=='AWAITING_ENTRY' and opened < trade['sent_at_ms']+policy.get('fill_delay_ms',0):
+                trade['last_checked_ms']=opened
+                continue
+            if state=='AWAITING_ENTRY' and policy.get('entry_mode')=='market_delayed' and opened < entry_deadline:
+                sign=-1 if short else 1
+                # A full future minute open is the reproducible latency proxy.
+                # Entry spread + slip are embedded here, never debited again.
+                fill=opening*(1+sign*(policy['spread_bps']/2+policy['slippage_bps'])/10000)
+                if not policy['price_min'] <= fill <= policy['price_max'] or sign*(fill-stop)<=0 or sign*(tp1-fill)<=0:
+                    trade.update(status='NO_ENTRY',finished_at_ms=opened,last_checked_ms=opened)
+                    policy.update(net_r_low=None,net_r_high=None,costs_complete=True)
+                    break
+                policy['actual_entry_drift_bps']=sign*(fill-policy['reference_entry'])/policy['reference_entry']*10000
+                policy['entry_friction_embedded']=True
+                trade.update(entry_price=fill,filled_at_ms=opened,status='OPEN')
+                entry=fill
+                state='OPEN'
         if state == "AWAITING_ENTRY":
             if opened >= entry_deadline or (policy.get("cost_model") and opened+MINUTE>entry_deadline):
                 trade["status"] = "NO_ENTRY"
@@ -124,7 +146,8 @@ def advance_trade(trade, candles):
                               and (low <= tp1 if short else high >= tp1))) and not touched(low, high, entry):
                 trade["status"] = "INVALIDATED"
                 trade["finished_at_ms"] = opened
-            elif touched(low, high, entry):
+            elif touched(low, high, entry) and (not policy.get('fill_penetration') or
+                  (high >= entry+policy['fill_penetration'] if short else low <= entry-policy['fill_penetration'])):
                 # Entry was reached; only subsequent candles can establish a
                 # defensible stop or target when the entry is intrabar.
                 if (touched(low, high, stop)
@@ -134,6 +157,8 @@ def advance_trade(trade, candles):
                 else:
                     trade["status"] = "OPEN"
                     trade["filled_at_ms"] = opened
+                    if policy.get('cost_model')=='paper-v2':
+                        policy['actual_entry_drift_bps']=(entry-policy['reference_entry'])/policy['reference_entry']*10000*(-1 if short else 1)
         elif state in ("OPEN", "TP1_HIT"):
             if opened >= trade["filled_at_ms"] + max_hold:
                 trade["status"] = "TP1_TIMEOUT" if state == "TP1_HIT" else "TIMEOUT"
@@ -145,7 +170,11 @@ def advance_trade(trade, candles):
                 tp1_hit = low <= tp1 if short else high >= tp1
                 tp2_hit = low <= tp2 if short else high >= tp2
                 if state == "OPEN":
-                    if stop_hit and tp1_hit:
+                    opening=float(candle[1])
+                    if stop_hit and tp1_hit and policy.get('cost_model')=='paper-v2' and (opening>=stop if short else opening<=stop):
+                        trade.update(status='STOPPED',finished_at_ms=opened,stop_at_ms=opened)
+                        policy['exit_price']=opening
+                    elif stop_hit and tp1_hit:
                         trade["status"] = "AMBIGUOUS_EXIT"
                         trade["finished_at_ms"] = opened
                     elif stop_hit:
@@ -170,7 +199,11 @@ def advance_trade(trade, candles):
                         else:
                             trade["status"] = "TP1_HIT"
                 else:
-                    if stop_hit and tp2_hit:
+                    opening=float(candle[1])
+                    if stop_hit and tp2_hit and policy.get('cost_model')=='paper-v2' and (opening>=effective_stop if short else opening<=effective_stop):
+                        trade.update(status='TP1_THEN_BREAKEVEN',finished_at_ms=opened,stop_at_ms=opened)
+                        policy['exit_price']=opening
+                    elif stop_hit and tp2_hit:
                         trade["status"] = "TP1_AMBIGUOUS_EXIT"
                         trade["finished_at_ms"] = opened
                     elif tp2_hit:
@@ -217,7 +250,7 @@ def _persist(conn, trade):
     conn.commit()
 
 
-def track_signals(database_url, client, now_ms=None, initialize=True):
+def track_signals(database_url, client, now_ms=None, initialize=True, budget_seconds=40):
     """Resume every outstanding signal from its saved 1m candle cursor.
 
     Binance allows up to 1000 candles per request; progress is committed
@@ -236,7 +269,10 @@ def track_signals(database_url, client, now_ms=None, initialize=True):
             " ORDER BY sent_at_ms ASC LIMIT 200", ACTIVE,
         ).fetchall()
         resolved = 0
+        deadline=time.monotonic()+budget_seconds
         for row in rows:
+            if time.monotonic()>=deadline:
+                break
             trade = dict(zip(COLUMNS, row))
             try:
                 for _ in range(4):  # bounded work per signal; next cron resumes

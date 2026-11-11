@@ -1,5 +1,6 @@
 """Read-only public Binance USD-M futures REST client."""
 import threading
+import time
 from math import isfinite
 from concurrent.futures import ThreadPoolExecutor
 import requests
@@ -24,14 +25,15 @@ class BinanceClient:
         self._local = threading.local()
         self._cache = {}
         self._cache_lock = threading.Lock()
+        self._blocked_until = 0.0
 
     def _session(self):
         session = getattr(self._local, "session", None)
         if session is None:
             session = requests.Session()
-            retry = Retry(total=2, backoff_factor=0.7,
-                          status_forcelist=(429, 500, 502, 503, 504),
-                          allowed_methods={"GET"}, respect_retry_after_header=True)
+            # Do not sleep an unbounded Retry-After inside a scanning worker.
+            # Transient failures retry at the next scheduled scan.
+            retry = Retry(total=0)
             session.mount("https://", HTTPAdapter(max_retries=retry, pool_connections=8, pool_maxsize=8))
             session.headers.update({"User-Agent": "CryptoScalpSentinel/0.1"})
             self._local.session = session
@@ -39,7 +41,20 @@ class BinanceClient:
 
     def get(self, path, **params):
         try:
-            response = self._session().get(f"{self.base_url}{path}", params=params, timeout=12)
+            if time.monotonic() < self._blocked_until:
+                raise BinanceError('exchange_rate_limit_cooldown')
+            remaining = getattr(self._local, 'deadline', float('inf')) - time.monotonic()
+            if remaining <= 0:
+                raise BinanceError('scan_deadline')
+            response = self._session().get(f"{self.base_url}{path}", params=params,
+                                          timeout=min(10, remaining))
+            if response.status_code in (418, 429):
+                try:
+                    wait = float(response.headers.get('Retry-After', 60))
+                except (TypeError, ValueError):
+                    wait = 60
+                with self._cache_lock:
+                    self._blocked_until = max(self._blocked_until, time.monotonic()+min(3600,max(60,wait)))
             response.raise_for_status()
             result = response.json()
             if isinstance(result, dict) and result.get("code", 0) < 0:
@@ -70,7 +85,14 @@ class BinanceClient:
             self._cache[key] = (bucket, value)
         return value
 
-    def scalp_snapshot(self, symbol, now_ms):
+    def scalp_snapshot(self, symbol, now_ms, deadline=None):
+        self._local.deadline = deadline if deadline is not None else float('inf')
+        try:
+            return self._scalp_snapshot(symbol, now_ms)
+        finally:
+            self._local.deadline = float('inf')
+
+    def _scalp_snapshot(self, symbol, now_ms):
         """Small, closed-candle snapshot for the standard 5m strategies."""
         out = {}
         for tf, duration in (("5m", 300000), ("15m", 900000)):
