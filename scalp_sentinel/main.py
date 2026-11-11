@@ -621,10 +621,12 @@ class Runner:
             if not self.journal.claim(cohort,s,decision):
                 record_decision(s,decision,'setup_already_used')
                 continue
+            paired_stamp=decision
             if cohort=='primary' and not cfg.dry_run:
                 try:
                     send_telegram(cfg.telegram_token,cfg.telegram_chat_id,format_signal(s,cfg.timezone))
-                    self.storage.mark_sent(s.symbol,s.side,signal=s)
+                    paired_stamp=int(time.time()*1000)
+                    self.storage.mark_sent(s.symbol,s.side,signal=s,sent_at_ms=paired_stamp)
                     self.journal.delivery(cohort,s,'sent')
                 except Exception:
                     # Telegram cannot guarantee idempotent delivery. An uncertain
@@ -638,7 +640,7 @@ class Runner:
                     log.info('DRY_RUN cohort=%s symbol=%s side=%s',cohort,s.symbol,s.side)
             peers.append(dict(symbol=s.symbol,side=s.side,journal_json=s.journal))
             if pro and cfg.standard_exit_shadows:
-                self.journal.add_standard_shadows(s,decision)
+                self.journal.add_standard_shadows(s,paired_stamp)
             record_decision(s,decision,'sent' if cohort=='primary' and not cfg.dry_run else 'paper_recorded')
             sent+=1
         return sent
@@ -661,6 +663,11 @@ def main():
             raise RuntimeError('another_worker_holds_lock')
         log.info('worker_started primary=%s shadow=%s continuous=%s symbols=%d',
                  cfg.primary_strategy,cfg.shadow_enabled,cfg.continuous,len(cfg.symbols))
+        if cfg.primary_strategy=='standard':
+            log.info('standard_operating_config enhanced=%s regime_filter=%s risk_pct=%.2f total_risk_pct=%.2f correlated_risk_pct=%.2f daily_loss_pct=%.2f hold_minutes=%d daily_summary=%s report_hour=%d timezone=%s',
+                     cfg.standard_enhanced,cfg.regime_filter_mode,cfg.risk_per_trade_pct,cfg.max_total_risk_pct,
+                     cfg.max_correlated_risk_pct,cfg.daily_loss_limit_pct,cfg.max_hold_minutes,
+                     cfg.daily_summary_enabled,cfg.daily_summary_hour,cfg.timezone)
         failures=0
         while not stop.is_set():
             started=time.time()

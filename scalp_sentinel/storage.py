@@ -33,16 +33,18 @@ class Cooldowns:
             (symbol, side)).fetchone()
         return row is None or time.time() - int(row[0]) >= cooldown_minutes * 60
 
-    def mark_sent(self, symbol, side, signal=None):
+    def mark_sent(self, symbol, side, signal=None, sent_at_ms=None):
+        if sent_at_ms is None:
+            sent_at_ms=int(time.time()*1000)
         if signal is not None and self.is_pg:
             from .tracker import record_sent
-            record_sent(self.conn, signal, int(time.time() * 1000))
+            record_sent(self.conn, signal, sent_at_ms)
         placeholder = "%s" if self.is_pg else "?"
         self.conn.execute(
             f"INSERT INTO scalp_signal_cooldowns(symbol, side, last_sent_epoch) "
             f"VALUES({placeholder}, {placeholder}, {placeholder}) "
             "ON CONFLICT(symbol, side) DO UPDATE SET last_sent_epoch=excluded.last_sent_epoch",
-            (symbol, side, int(time.time())))
+            (symbol, side, sent_at_ms//1000))
         self.conn.commit()
 
     def close(self):

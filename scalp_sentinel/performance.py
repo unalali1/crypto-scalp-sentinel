@@ -27,6 +27,8 @@ def outcome_bounds(trade, close):
     if trade["status"] not in states:
         return {"net_r_low": None, "net_r_high": None, "costs_complete": True}
     low, high = states[trade["status"]]
+    if trade['status']=='AMBIGUOUS_ENTRY' and p.get('ambiguous_gap_exit') is not None:
+        low=min(low,side*(p['ambiguous_gap_exit']-entry)/risk)
     # Explicit estimated notional-cost allowance on both sides. Funding
     # is resolved separately from exchange history, never silently assumed 0.
     cost = 2 * (p.get("fee_bps", 5) + p.get("slippage_bps", 2)) / 10000 * entry / risk

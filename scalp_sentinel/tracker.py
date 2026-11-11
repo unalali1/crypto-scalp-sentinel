@@ -139,23 +139,27 @@ def advance_trade(trade, candles):
                 trade.update(entry_price=fill,filled_at_ms=opened,status='OPEN')
                 entry=fill
                 state='OPEN'
+        limit_reached=touched(low,high,entry) or (
+            policy.get('entry_mode')=='passive_limit' and (low>entry if short else high<entry))
         if state == "AWAITING_ENTRY":
             if opened >= entry_deadline or (policy.get("cost_model") and opened+MINUTE>entry_deadline):
                 trade["status"] = "NO_ENTRY"
                 trade["finished_at_ms"] = opened
             elif modern and ((high >= stop if short else low <= stop) or
                              (policy.get("invalidate_target_before_entry", False)
-                              and (low <= tp1 if short else high >= tp1))) and not touched(low, high, entry):
+                              and (low <= tp1 if short else high >= tp1))) and not limit_reached:
                 trade["status"] = "INVALIDATED"
                 trade["finished_at_ms"] = opened
-            elif touched(low, high, entry) and (not policy.get('fill_penetration') or
+            elif limit_reached and (not policy.get('fill_penetration') or
                   (high >= entry+policy['fill_penetration'] if short else low <= entry-policy['fill_penetration'])):
                 # Entry was reached; only subsequent candles can establish a
                 # defensible stop or target when the entry is intrabar.
-                if (touched(low, high, stop)
+                if ((high >= stop if short else low <= stop)
                         or (low <= tp1 if short else high >= tp1)):
                     trade["status"] = "AMBIGUOUS_ENTRY"
                     trade["finished_at_ms"] = opened
+                    if policy.get('cost_model')=='paper-v2':
+                        policy['ambiguous_gap_exit']=max(float(candle[1]),stop) if short else min(float(candle[1]),stop)
                 else:
                     trade["status"] = "OPEN"
                     trade["filled_at_ms"] = opened

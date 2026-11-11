@@ -223,3 +223,10 @@ class StandardForward(unittest.TestCase):
     def test_live_invalid_database_url_fails_closed(self):
         from scalp_sentinel.storage import Cooldowns
         with self.assertRaises(ValueError):Cooldowns('host=localhost dbname=test',False)
+
+    def test_passive_gap_through_entry_and_stop_is_not_no_entry(self):
+        s=signal(); prepare(s,snap()['book'],NOW,settings())
+        t=paper_trade(s,NOW); ts=t['last_checked_ms']+60000
+        out=advance_trade(t,[bar(ts,s.stop-.10,s.stop-.05,s.stop-.20,s.stop-.08)])
+        self.assertEqual(out['status'],'AMBIGUOUS_ENTRY')
+        self.assertLess(out['journal_json']['gross_r_low'],-1)
