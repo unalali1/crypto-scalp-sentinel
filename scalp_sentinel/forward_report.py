@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from .tracker import COLUMNS, ACTIVE
 from .performance import summarize
 from .notifier import send_telegram
+from .journal import SCORE_LOW_COHORT
 
 log=logging.getLogger('sentinel.forward')
 
@@ -51,7 +52,43 @@ def summarize_window(trades, scans, start, end):
         note='Signal-date cohort; active/incomplete excluded. Ambiguity is bounded, never called a win. No profitability claim.')
 
 
-def read_window(conn,start,end):
+def score_comparison(trades,threshold=60):
+    """Only prospectively tagged ideas; never mix old unfiltered recommendations."""
+    selected=[t for t in trades if (t.get('journal_json') or {}).get('notification_policy')=='technical-score-v1'
+              and t['journal_json'].get('score_threshold')==threshold]
+    groups={}
+    for group in ('above','below'):
+        rows=[dict(t,strategy_version='ALL',symbol='ALL',side='ALL',
+                   journal_json=dict(t['journal_json'],regime='ALL')) for t in selected
+              if t['journal_json'].get('score_group')==group]
+        groups[group]=summarize(rows)[0] if rows else {}
+    return dict(threshold=threshold,groups=groups,
+                first_observed_ms=min((t['sent_at_ms'] for t in selected),default=None),
+                note='Independent paper ideas, not randomized trials. Silent timestamps are decision times; notified timestamps are send times.')
+
+
+def add_review_readiness(result,now_ms):
+    first=result['first_observed_ms']
+    result['elapsed_days']=(now_ms-first)/86400000 if first is not None else 0
+    result['review_ready']=(result['elapsed_days']>=7 and result['groups']['above'].get('resolved',0)>=100)
+    return result
+
+
+def read_score_study(conn,now_ms,threshold=60):
+    # A bounded 30-day review window; source histories remain durable.
+    start=now_ms-30*86400000
+    rows=conn.execute('SELECT '+','.join(COLUMNS)+''' FROM scalp_signal_outcomes
+        WHERE sent_at_ms >= %s AND sent_at_ms < %s
+        AND journal_json->>'notification_policy'='technical-score-v1' ''',(start,now_ms)).fetchall()
+    trades=[dict(zip(COLUMNS,row)) for row in rows]
+    trades += [r[0] for r in conn.execute('''SELECT trade FROM scalp_shadow_outcomes
+        WHERE cohort=%s AND sent_at_ms >= %s AND sent_at_ms < %s''',
+        (SCORE_LOW_COHORT,start,now_ms)).fetchall()]
+    conn.commit()
+    return add_review_readiness(score_comparison(trades,threshold),now_ms)
+
+
+def read_window(conn,start,end,threshold=60):
     rows=conn.execute('SELECT '+','.join(COLUMNS)+''' FROM scalp_signal_outcomes
         WHERE sent_at_ms >= %s AND sent_at_ms < %s
         AND strategy_version IN ('ema-pullback','breakout-retest')''',(start,end)).fetchall()
@@ -60,7 +97,11 @@ def read_window(conn,start,end):
     shadows=[r[0] for r in conn.execute("SELECT trade FROM scalp_shadow_outcomes WHERE cohort LIKE 'standard-%%' AND sent_at_ms >= %s AND sent_at_ms < %s",(start,end)).fetchall()]
     conn.commit()
     report=summarize_window(trades,scans,start,end)
-    report['paired_shadows']=summarize([dict(t,symbol='ALL',side='ALL',journal_json=dict(t.get('journal_json') or {},regime='ALL')) for t in shadows])
+    low=[t for t in shadows if t.get('journal_json',{}).get('score_group')=='below'
+         and t.get('journal_json',{}).get('notification_policy')=='technical-score-v1']
+    paired=[t for t in shadows if t not in low]
+    report['score_comparison']=score_comparison(trades+low,threshold)
+    report['paired_shadows']=summarize([dict(t,symbol='ALL',side='ALL',journal_json=dict(t.get('journal_json') or {},regime='ALL')) for t in paired])
     return report
 
 
@@ -77,6 +118,17 @@ def format_digest(day, report):
         f"Engeller: {json.dumps(report['blocked'],ensure_ascii=False)}"]
     for name,result in report['by_strategy'].items():
         lines.append(f"{name}: {result['signals']} sinyal, {result['resolved']} sonuç, net R {fmt(result['mean_net_r_low'])}")
+    comparison=report.get('score_study',report.get('score_comparison',{}))
+    if comparison:
+        lines.append('Puan karşılaştırması — '+('son 30 gün' if 'score_study' in report else 'rapor dönemi'))
+    for group,result in comparison.get('groups',{}).items():
+        label='Bildirim alan' if group=='above' else 'Sessiz izlenen'
+        filled=result.get('filled',0); total_ideas=result.get('signals',0)
+        lines.append(f"{label} (eşik {comparison['threshold']:g}): {total_ideas} fikir, {result.get('resolved',0)} sonuç; "
+                     f"giriş {filled}/{total_ideas}, net R {fmt(result.get('mean_net_r_low'))}, PF {fmt(result.get('profit_factor_low'))}")
+    if 'review_ready' in comparison:
+        lines.append(f"İlk karşılaştırma için 7 gün ve 100 tamamlanmış {comparison['threshold']:g}+ işlem: "+
+                     ('hazır (kârlılık kanıtı değildir).' if comparison['review_ready'] else 'henüz tamamlanmadı.'))
     lines.append('Sanal eşit risk hesabı; gerçek hesap getirisi değildir. Açık/eksik sonuç başarı sayılmaz.')
     return '\n'.join(lines)[:3900]
 
@@ -86,10 +138,11 @@ def maintain_reports(runner, now_ms):
     if conn is None:
         return
     if runner.last_report != now_ms//3600000:
-        report=read_window(conn,now_ms-86400000,now_ms)
+        report=read_window(conn,now_ms-86400000,now_ms,runner.cfg.standard_min_score)
         # Separate bounded log lines remain readable in hosted logs.
         log.info('standard_forward_24h %s',json.dumps({k:v for k,v in report.items() if k!='paired_shadows'},ensure_ascii=False))
         log.info('standard_paired_shadows %s',json.dumps(report['paired_shadows'],ensure_ascii=False))
+        log.info('standard_score_study %s',json.dumps(read_score_study(conn,now_ms,runner.cfg.standard_min_score),ensure_ascii=False))
         runner.last_report=now_ms//3600000
     local=datetime.fromtimestamp(now_ms/1000,tz=ZoneInfo(runner.cfg.timezone))
     if local.hour >= runner.cfg.daily_summary_hour:
@@ -99,7 +152,8 @@ def maintain_reports(runner, now_ms):
         existing=conn.execute('SELECT delivery FROM scalp_daily_reports WHERE report_day=%s',(day,)).fetchone()
         conn.commit()
         if existing is None:
-            report=read_window(conn,int(start.timestamp()*1000),int(end.timestamp()*1000))
+            report=read_window(conn,int(start.timestamp()*1000),int(end.timestamp()*1000),runner.cfg.standard_min_score)
+            report['score_study']=read_score_study(conn,now_ms,runner.cfg.standard_min_score)
             status='reserved' if runner.cfg.daily_summary_enabled else 'disabled'
             row=conn.execute('''INSERT INTO scalp_daily_reports VALUES (%s,%s::jsonb,%s,%s)
                 ON CONFLICT DO NOTHING RETURNING report_day''',(day,json.dumps(report),now_ms,status)).fetchone()

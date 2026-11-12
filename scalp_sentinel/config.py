@@ -44,6 +44,7 @@ class Config:
     min_efficiency: float = 0.25
     context_chat_id: str = ""
     standard_enhanced: bool = False
+    standard_min_score: float = 60.0
     regime_filter_mode: str = "shadow"
     scan_budget_seconds: int = 45
     risk_per_trade_pct: float = .35
@@ -55,6 +56,8 @@ class Config:
         from math import isfinite
         from zoneinfo import ZoneInfo
         ZoneInfo(self.timezone)
+        if not 0 <= self.standard_min_score <= 100:
+            raise ValueError('STANDARD_MIN_SCORE must be between 0 and 100')
         if any(not isfinite(v) for v in vars(self).values() if isinstance(v, (int, float))):
             raise ValueError("Nonfinite configuration")
         if self.regime_filter_mode not in ('shadow', 'enforce'):
@@ -118,6 +121,7 @@ class Config:
             min_efficiency=float(os.getenv("MIN_EFFICIENCY", .25)),
             context_chat_id=os.getenv("CONTEXT_CHAT_ID", "").strip(),
             standard_enhanced=bool_env("STANDARD_ENHANCED", True),
+            standard_min_score=float(os.getenv('STANDARD_MIN_SCORE',60)),
             regime_filter_mode=os.getenv("REGIME_FILTER_MODE", "shadow"),
             scan_budget_seconds=int(os.getenv("SCAN_BUDGET_SECONDS", 45)),
             risk_per_trade_pct=float(os.getenv("RISK_PER_TRADE_PCT", .35)),

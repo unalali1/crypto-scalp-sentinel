@@ -22,6 +22,7 @@ NOW=1800000003000
 
 
 def settings(**kwargs):
+    kwargs.setdefault('standard_min_score',0)
     return replace(config(),primary_strategy='standard',standard_enhanced=True,
         max_cost_r=.4, **kwargs)
 
@@ -112,7 +113,7 @@ class StandardForward(unittest.TestCase):
             self.assertEqual(len(r.journal.memory_trades),7)
             for trade in r.journal.memory_trades[-2:]:
                 self.assertTrue(trade['journal_json']['advisory_only'])
-                self.assertEqual(trade['journal_json']['notification_policy'],'independent-ideas-v1')
+                self.assertEqual(trade['journal_json']['notification_policy'],'technical-score-v1')
         finally:r.close()
 
     def test_risk_sizes_without_account_balance_and_margin_scales_correctly(self):

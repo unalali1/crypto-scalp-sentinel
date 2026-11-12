@@ -9,11 +9,12 @@ import psycopg
 from psycopg import sql
 from urllib.parse import urlencode
 from scalp_sentinel.storage import Cooldowns
-from scalp_sentinel.journal import Journal
+from scalp_sentinel.journal import Journal, SCORE_LOW_COHORT
 from scalp_sentinel.main import Runner
-from scalp_sentinel.forward_report import maintain_reports, read_window
+from scalp_sentinel.forward_report import maintain_reports, read_window, read_score_study
 from scalp_sentinel.execution import prepare
 from test_standard_forward import settings, signal, snap, NOW
+from test_score_filter import force_score
 
 
 @unittest.skipUnless(os.environ.get('TEST_DATABASE_URL'),'requires isolated CI PostgreSQL')
@@ -118,3 +119,52 @@ class PostgresForward(unittest.TestCase):
             r2.snapshots={'TEST':snap()}
             self.assertEqual(r2.deliver([signal()],'primary',NOW),0)
             self.assertEqual(send.call_count,1)
+
+    def test_low_score_is_silent_durable_and_never_promoted_on_retry(self):
+        cfg=settings(database_url=self.dsn,dry_run=False,telegram_token='test',telegram_chat_id='test',
+                     standard_min_score=60,standard_exit_shadows=False)
+        client=SimpleNamespace(get=lambda *_a,**_kw:snap()['book'])
+        r=Runner(cfg,client); self.resources.append(r); r.snapshots={'TEST':snap()}
+        with patch('scalp_sentinel.main.time.time',return_value=NOW/1000), \
+             patch('scalp_sentinel.main.rank',side_effect=force_score(59.99)), \
+             patch('scalp_sentinel.main.send_telegram') as send:
+            self.assertEqual(r.deliver([signal()],'primary',NOW),0)
+            send.assert_not_called()
+        r2=Runner(cfg,client); self.resources.append(r2); r2.snapshots={'TEST':snap()}
+        self.assertFalse(r2.journal.pending_delivery())
+        self.assertEqual(len(r2.journal.active(SCORE_LOW_COHORT)),1)
+
+        with patch('scalp_sentinel.main.time.time',return_value=NOW/1000), \
+             patch('scalp_sentinel.main.rank',side_effect=force_score(60)), \
+             patch('scalp_sentinel.main.send_telegram') as send:
+            self.assertEqual(r2.deliver([signal()],'primary',NOW),0)
+            fresh=signal(symbol='NEW'); r2.snapshots['NEW']=snap()
+            self.assertEqual(r2.deliver([fresh],'primary',NOW),1)
+            self.assertEqual(send.call_count,1)
+        report=read_window(r2.storage.conn,NOW-1,NOW+1)
+        self.assertEqual(report['sent'],1)
+        self.assertEqual(report['score_comparison']['groups']['below']['signals'],1)
+        self.assertEqual(report['score_comparison']['groups']['above']['signals'],1)
+        self.assertEqual(report['paired_shadows'],[])
+        study=read_score_study(r2.storage.conn,NOW+1)
+        self.assertFalse(study['review_ready'])
+        # Historical silent experiments are retained after ordinary shadow pruning.
+        r2.storage.conn.execute("UPDATE scalp_shadow_outcomes SET status='NO_ENTRY', trade=trade || %s::jsonb WHERE cohort=%s",('{"status":"NO_ENTRY","journal_json":{"costs_complete":true}}',SCORE_LOW_COHORT))
+        r2.storage.conn.commit()
+        r2.journal.prune(NOW+31*86400000,30)
+        count=r2.storage.conn.execute('SELECT count(*) FROM scalp_shadow_outcomes WHERE cohort=%s',(SCORE_LOW_COHORT,)).fetchone()[0]
+        r2.storage.conn.commit()
+        self.assertEqual(count,1)
+
+    def test_silent_record_failure_rolls_back_setup_claim(self):
+        c=self.storage(); j=Journal(c.conn)
+        s=signal(); prepare(s,snap()['book'],NOW,settings())
+        c.conn.execute("ALTER TABLE scalp_shadow_outcomes ADD CONSTRAINT reject_silent_test CHECK (cohort<>'standard-score-v1-low')")
+        c.conn.commit()
+        with self.assertRaises(psycopg.errors.CheckViolation):
+            j.record_score_low(s,NOW)
+        self.assertFalse(j.pending_delivery())
+        c.conn.execute('ALTER TABLE scalp_shadow_outcomes DROP CONSTRAINT reject_silent_test')
+        c.conn.commit()
+        self.assertTrue(j.record_score_low(s,NOW))
+        self.assertFalse(j.record_score_low(s,NOW))

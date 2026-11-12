@@ -11,7 +11,7 @@ from .binance_client import BinanceClient, BinanceError, DataPending
 from .config import Config
 from .engine import evaluate, prefilter_rejections
 from .execution import prepare
-from .journal import Journal
+from .journal import Journal, SCORE_LOW_COHORT
 from .notifier import format_signal, send_telegram
 from .research import candidate_v3, correlated, regime, v2_shadow_variants
 from .confluence import detect_confluences, format_confluence_digest
@@ -311,7 +311,7 @@ class Runner:
             raise RuntimeError('no_perpetual_symbols')
         # Never reuse a previous scan's failed/missing correlation context.
         self.snapshots={}
-        peers=self.journal.active('primary')
+        peers=self.journal.active('primary')+self.journal.active(SCORE_LOW_COHORT)
         wanted=set(symbols)
         if pro:
             wanted.update(p['symbol'] for p in peers)
@@ -564,6 +564,8 @@ class Runner:
             log.error('delivery_uncertain_primary_paused reconciliation_required=true')
             return 0
         peers=self.journal.active(cohort)
+        if enhanced(cfg) and cohort=='primary':
+            peers+=self.journal.active(SCORE_LOW_COHORT)
         sent=0
         # Standard signals are independent ideas, not positions in the user's
         # account. Paper outcomes must never throttle subsequent suggestions.
@@ -615,6 +617,19 @@ class Runner:
                          s.symbol,s.strategy_version,s.quality_score,s.journal['regime'],s.journal['estimated_net_tp1_rr'],json.dumps(s.journal['quality_components'],sort_keys=True))
             if advisory:
                 s.journal.update(advisory_only=True,notification_policy='independent-ideas-v1')
+            if pro:
+                low=s.quality_score<cfg.standard_min_score
+                s.journal.update(notification_policy='technical-score-v1',
+                    score_threshold=cfg.standard_min_score,score_group='below' if low else 'above',
+                    score_decision_ms=decision)
+                if low:
+                    recorded=self.journal.record_score_low(s,decision)
+                    record_decision(s,decision,'score_below_threshold' if recorded else 'setup_already_used')
+                    if recorded:
+                        peers.append(dict(symbol=s.symbol,side=s.side,journal_json=s.journal))
+                        log.info('standard_score_silent symbol=%s score=%.2f threshold=%.2f',
+                                 s.symbol,s.quality_score,cfg.standard_min_score)
+                    continue
             if not self.journal.claim(cohort,s,decision):
                 record_decision(s,decision,'setup_already_used')
                 continue
@@ -661,6 +676,8 @@ def main():
         log.info('worker_started primary=%s shadow=%s continuous=%s symbols=%d',
                  cfg.primary_strategy,cfg.shadow_enabled,cfg.continuous,len(cfg.symbols))
         if cfg.primary_strategy=='standard':
+            log.info('standard_score_filter enabled=%s min_score=%.2f silent_cohort=%s',
+                     cfg.standard_enhanced,cfg.standard_min_score,SCORE_LOW_COHORT)
             log.info('standard_operating_config advisory_only=true daily_loss_gate=false portfolio_gates=false paper_cooldown=false signal_cap=false enhanced=%s regime_filter=%s illustrative_risk_pct=%.2f hold_minutes=%d daily_summary=%s report_hour=%d timezone=%s',
                      cfg.standard_enhanced,cfg.regime_filter_mode,cfg.risk_per_trade_pct,cfg.max_hold_minutes,
                      cfg.daily_summary_enabled,cfg.daily_summary_hour,cfg.timezone)
