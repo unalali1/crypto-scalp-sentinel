@@ -8,6 +8,7 @@ from .tracker import ACTIVE, MINUTE, advance_trade, COLUMNS, _persist
 from .performance import settle_funding
 
 log=logging.getLogger("sentinel.journal")
+SCORE_LOW_COHORT='standard-score-v1-low'
 
 
 def paper_trade(signal, now_ms):
@@ -140,6 +141,29 @@ class Journal:
             self.conn.execute('INSERT INTO scalp_standard_scans VALUES (%s,%s::jsonb) ON CONFLICT DO NOTHING',
                               (now_ms,json.dumps(metrics)))
             self.conn.commit()
+
+    def record_score_low(self,signal,now_ms):
+        """Atomically freeze a setup's silent route and persist its paper trade."""
+        if self.conn is None:
+            if not self.claim('primary',signal,now_ms):
+                return False
+            self.add_shadow(SCORE_LOW_COHORT,signal,now_ms)
+            return True
+        try:
+            row=self.conn.execute('''INSERT INTO scalp_setup_claims
+                (cohort,setup_id,symbol,claimed_ms,delivery) VALUES ('primary',%s,%s,%s,'filtered')
+                ON CONFLICT DO NOTHING RETURNING setup_id''',
+                (signal.setup_id,signal.symbol,now_ms)).fetchone()
+            if row:
+                trade=paper_trade(signal,now_ms)
+                self.conn.execute('''INSERT INTO scalp_shadow_outcomes
+                    (cohort,setup_id,trade,status,sent_at_ms) VALUES (%s,%s,%s::jsonb,%s,%s)''',
+                    (SCORE_LOW_COHORT,signal.setup_id,json.dumps(trade),trade['status'],now_ms))
+            self.conn.commit()
+            return row is not None
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def add_standard_shadows(self,signal,now_ms):
         for kind in ('hold30','hold60','market-delay'):
@@ -499,6 +523,7 @@ class Journal:
         # Compact paired exit experiments; primary history and daily reports stay.
         self.conn.execute("""DELETE FROM scalp_shadow_outcomes WHERE ctid IN (
             SELECT ctid FROM scalp_shadow_outcomes WHERE cohort LIKE 'standard-%%'
+            AND cohort<>'standard-score-v1-low'
             AND sent_at_ms<%s AND status NOT IN (%s,%s,%s)
             AND trade->'journal_json'->>'costs_complete'='true' LIMIT 10000)""",(cutoff,*ACTIVE))
         self.conn.commit()

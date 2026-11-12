@@ -345,3 +345,6 @@ Do not deploy an old tracker over open new-model trades: it cannot interpret
 their deadlines and partial exits. `V2_ENABLED=false` invokes the historical
 single-scan V1 entrypoint; use only with periodic operation after new-model
 positions are drained. No automated rollback deletes data or changes secrets.
+
+### Technical score notification filter
+Enhanced standard ideas scoring at least `STANDARD_MIN_SCORE` (default 60/100) are notified. Otherwise eligible lower-scoring ideas are silently paper-tracked using the same execution rules. The score is technical suitability, not win probability. Daily reporting compares the two prospective groups; the first review requires seven days and 100 settled, filled notified outcomes. No daily-loss or portfolio gate is added.

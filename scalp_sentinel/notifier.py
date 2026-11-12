@@ -61,6 +61,21 @@ def format_signal(signal, tz):
     return "\n".join(rows)
 
 
+def weakest_components(policy):
+    labels={
+        'trend':('Trend gücü',15),'structure':('Destek/dirence kadar alan',15),
+        'volume':('Göreli hacim',10),'entry':('Giriş konumu',10),
+        'liquidity':('Likidite',10),'volatility':('Piyasa rejimi',10),
+        'net_reward_risk':('Yakın seviyeye göre net ödül/risk',10),
+        'costs':('İşlem maliyeti',10),'btc':('BTC yön uyumu',5),
+        'diversification':('Diğer önerilerden bağımsızlık',5)}
+    values=[(value/labels[key][1],key,value) for key,value in
+            policy.get('quality_components',{}).items() if key in labels]
+    weakest=sorted(values,key=lambda item:(item[0],item[1]))[:2]
+    return '; '.join(f'{labels[key][0]} {value:.1f}/{labels[key][1]}'
+                     for _,key,value in weakest) or 'bileşen verisi yok'
+
+
 def format_standard_signal(s,tz):
     p=s.journal
     price=lambda value: fmt_price(value,s.tick_size)
@@ -71,7 +86,8 @@ def format_standard_signal(s,tz):
             if s.strategy_version=='ema-pullback' else 'Hacimle kırılan seviyeye geri test ve kapanmış teyit mumu.')
     lines=[f'{title} | {s.symbol} | {strategy}',
         'İşlem fikri • Sonucu sanal olarak izlenir; işleme girip girmemek size aittir.',
-        f"Kalite: {p.get('quality_score',0):.1f}/100 (kazanma olasılığı değildir) | Rejim: {p.get('regime','?')}",
+        f"Teknik uygunluk puanı: {p.get('quality_score',0):.1f}/100 (kazanma olasılığı değildir) | Rejim: {p.get('regime','?')}",
+        f"Görece zayıf iki unsur: {weakest_components(p)}",
         reason,'',f'Limit giriş referansı: {price(s.entry)} USDT',
         f"Güncel bid / ask: {price(p['bid'])} / {price(p['ask'])}",
         f'Stop: {price(s.stop)} | Fiyat riski: %{abs(s.entry-s.stop)/s.entry*100:.2f}',

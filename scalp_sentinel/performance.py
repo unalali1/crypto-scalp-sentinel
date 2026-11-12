@@ -81,9 +81,10 @@ def summarize(trades):
         groups[key].append(t)
     result = []
     for key, rows in sorted(groups.items()):
-        closed = sorted((t for t in rows if (t.get("journal_json") or {}).get("costs_complete")
+        closed = sorted((t for t in rows if t['status'] not in ('AWAITING_ENTRY','OPEN','TP1_HIT','NO_ENTRY','INVALIDATED')
+                         and (t.get("journal_json") or {}).get("costs_complete")
                          and (t.get("journal_json") or {}).get("net_r_low") is not None),
-                        key=lambda t: (t.get("finished_at_ms", 0), t.get("sent_at_ms", 0)))
+                        key=lambda t: (t.get("finished_at_ms") or 0, t.get("sent_at_ms", 0)))
         low = [t["journal_json"]["net_r_low"] for t in closed]
         high = [t["journal_json"]["net_r_high"] for t in closed]
         # A signal with no entry earns zero, while unresolved/data-gap signals
