@@ -282,6 +282,43 @@ class StandardProShadowTests(unittest.TestCase):
         })
         self.assertIn("Yeni shadow (standard-pro-v1): 8 fikir, 6 sonuç", digest)
 
+    def test_daily_vwap_and_mitigated_liquidity_rules(self):
+        cfg = _pro_cfg()
+        snap = _base_snapshot("LONG", setup="vcp")
+        btc = _base_snapshot("LONG", setup="vcp")
+        # Huge volume spike on an earlier 15m bar above current price pulls Daily VWAP above entry.
+        day_bucket = int(snap["15m"][-1][0]) // 86400000
+        for row in snap["15m"]:
+            if int(row[0]) // 86400000 == day_bucket and int(row[0]) < int(snap["15m"][-1][0]):
+                row[2] = "108.0"
+                row[3] = "107.0"
+                row[4] = "107.5"
+                row[5] = "500000"
+                break
+        signals, _ = assess_pro("SOLUSDT", snap, "0.01", btc, cfg)
+        sig = next(s for s in signals if s.side == "LONG" and s.strategy_version == "pro-vcp-trend")
+        self.assertFalse(sig.checks["daily vwap"])
+        self.assertFalse(sig.eligible)
+
+        # A 15m pivot high that was already pierced later is mitigated and does not block room.
+        mit = _base_snapshot("LONG", setup="sfp")
+        for idx in range(70, 75):
+            mit["15m"][idx][2] = "100.30"
+        mit["15m"][72][2] = "100.55"
+        mit["15m"][76][2] = "101.50"  # mitigates the pivot at 72 while staying >1.15R away
+        signals, _ = assess_pro("ETHUSDT", mit, "0.01", btc, cfg)
+        sfp_sig = next(s for s in signals if s.side == "LONG" and s.strategy_version == "pro-sfp-reclaim")
+        self.assertTrue(sfp_sig.checks["structure room"])
+
+    def test_confluence_supports_extended_oscillators_on_4h_and_1d(self):
+        from scalp_sentinel.confluence import detect_confluences
+        # Deterministic 80-bar 4h series should evaluate cleanly with Stoch/CCI/CMF included.
+        ts4 = _aligned_ts(80, 14400000)
+        rows = [_bar(t, 100 + i * 0.1, 101 + i * 0.1, 99 + i * 0.1, 100 + i * 0.1, v=500.0, duration=14400000)
+                for i, t in enumerate(ts4)]
+        result = detect_confluences("BTCUSDT", {"4h": rows}, "0.01", timeframes=("4h",))
+        self.assertIsInstance(result, list)
+
 
 if __name__ == "__main__":
     unittest.main()

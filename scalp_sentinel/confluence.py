@@ -82,6 +82,43 @@ def _mfi(highs,lows,closes,volumes,period=14):
     return out
 
 
+def _stoch(highs, lows, closes, period=14, smooth=3):
+    raw = [None] * len(closes)
+    for i in range(period - 1, len(closes)):
+        hh = max(highs[i - period + 1:i + 1])
+        ll = min(lows[i - period + 1:i + 1])
+        raw[i] = 50.0 if hh == ll else (closes[i] - ll) / (hh - ll) * 100.0
+    out = [None] * len(closes)
+    for i in range(period + smooth - 2, len(closes)):
+        vals = raw[i - smooth + 1:i + 1]
+        if all(v is not None for v in vals):
+            out[i] = sum(vals) / smooth
+    return out
+
+
+def _cci(highs, lows, closes, period=10):
+    tp = [(h + l + c) / 3 for h, l, c in zip(highs, lows, closes)]
+    out = [None] * len(closes)
+    for i in range(period - 1, len(closes)):
+        win = tp[i - period + 1:i + 1]
+        mean = sum(win) / period
+        mad = sum(abs(x - mean) for x in win) / period
+        out[i] = 0.0 if mad == 0 else (tp[i] - mean) / (0.015 * mad)
+    return out
+
+
+def _cmf(highs, lows, closes, volumes, period=21):
+    out = [None] * len(closes)
+    mfv = [
+        0.0 if h == l else ((c - l) - (h - c)) / (h - l) * v
+        for h, l, c, v in zip(highs, lows, closes, volumes)
+    ]
+    for i in range(period - 1, len(closes)):
+        vol_sum = sum(volumes[i - period + 1:i + 1])
+        out[i] = None if vol_sum <= 0 else sum(mfv[i - period + 1:i + 1]) / vol_sum
+    return out
+
+
 def _atr(rows,period=14):
     tr=[]
     for i in range(1,len(rows)):
@@ -111,7 +148,10 @@ def _series_divergences(rows):
     oscillators={
         "RSI":_rsi(closes),
         "MACD":_macd_hist(closes),
+        "Stoch":_stoch(highs,lows,closes),
+        "CCI":_cci(highs,lows,closes),
         "OBV":_obv(closes,volumes),
+        "CMF":_cmf(highs,lows,closes,volumes),
         "MFI":_mfi(highs,lows,closes,volumes),
     }
     output=[]

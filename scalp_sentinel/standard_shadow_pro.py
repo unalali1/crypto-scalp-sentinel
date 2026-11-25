@@ -1,11 +1,13 @@
-"""Improved shadow-only 5m scalp setups with regime, BTC, flow and structure gates."""
-from math import isfinite
+"""Improved shadow-only 5m scalp setups with VWAP, untouched liquidity, BTC and flow gates."""
+from datetime import datetime, timezone
+from math import isfinite, sqrt
 
 from .engine import Signal, atr, candles, ema, price_round
 from .research import correlation, delta_ratio, return_series
 from .standard_quality import regime_context
 
 FIVE_MINUTES = 300_000
+DAY_MS = 86_400_000
 PRO_COHORT = "standard-pro-v1"
 
 
@@ -45,34 +47,97 @@ def _taker_flow(snapshot, side, min_bar_delta, min_three_delta):
     return ok, d1, d3
 
 
-def _confirmed_obstacles(bars, side, entry):
-    """Return distances from entry to confirmed 5-bar swing levels ahead of price."""
+def _untouched_pivots(bars, side):
+    """Return unmitigated 5-bar swing levels ahead of price (Pine LIKIDITE/POI rule)."""
     if len(bars) < 10:
         return []
     sign = 1 if side == "LONG" else -1
-    distances = []
+    levels = []
     for i in range(2, len(bars) - 2):
         window = bars[i - 2:i + 3]
         val = bars[i].h if sign == 1 else bars[i].l
         is_pivot = val == (max(b.h for b in window) if sign == 1 else min(b.l for b in window))
-        if is_pivot and sign * (val - entry) > 0:
-            distances.append(sign * (val - entry))
-    return distances
+        if not is_pivot:
+            continue
+        # Only untouched/unbroken levels remain active liquidity or structural supply/demand.
+        mitigated = any(
+            (b.h >= val if sign == 1 else b.l <= val)
+            for b in bars[i + 3:]
+        )
+        if not mitigated:
+            levels.append(val)
+    return levels
 
 
 def _room_r(side, entry, risk, snapshot):
-    """Compute distance in R to the nearest confirmed 15m or 1h structural obstacle."""
+    """Compute distance in R to the nearest untouched 15m or 1h structural obstacle."""
     if risk <= 0:
         return 0.0
-    obstacles = _confirmed_obstacles(candles(snapshot["15m"]), side, entry)
+    sign = 1 if side == "LONG" else -1
+    candidates = _untouched_pivots(candles(snapshot["15m"]), side)
     hourly_rows = snapshot.get("1h") or []
     if len(hourly_rows) >= 20:
-        obstacles.extend(_confirmed_obstacles(candles(hourly_rows), side, entry))
-    return min(obstacles) / risk if obstacles else 3.0
+        candidates.extend(_untouched_pivots(candles(hourly_rows), side))
+    ahead = [sign * (val - entry) for val in candidates if sign * (val - entry) > 0]
+    return min(ahead) / risk if ahead else 3.0
+
+
+def _daily_vwap(snapshot):
+    """Compute intraday UTC Daily VWAP and volume-weighted stdev from closed bars."""
+    fifteen = candles(snapshot["15m"])
+    day_bucket = fifteen[-1].ts // DAY_MS
+    session = [b for b in fifteen if b.ts // DAY_MS == day_bucket]
+    if len(session) < 2:
+        five = candles(snapshot["5m"])
+        day_bucket = five[-1].ts // DAY_MS
+        session = [b for b in five if b.ts // DAY_MS == day_bucket]
+    if not session:
+        return None, 0.0
+    pv = sum(((b.h + b.l + b.c) / 3) * b.v for b in session)
+    vol = sum(b.v for b in session)
+    if vol <= 0:
+        return None, 0.0
+    vwap = pv / vol
+    var = sum(b.v * (((b.h + b.l + b.c) / 3) - vwap) ** 2 for b in session) / vol
+    return vwap, sqrt(max(0.0, var))
+
+
+def _htf_sweep_pools(snapshot, side):
+    """Collect untouched 15m/1h swing extremes plus PDH/PDL and Monday High/Low."""
+    target_side = "SHORT" if side == "LONG" else "LONG"  # LONG sweeps lows; SHORT sweeps highs.
+    pools = []
+    fifteen = candles(snapshot["15m"])
+    if len(fifteen) >= 12:
+        for val in _untouched_pivots(fifteen[:-1], target_side):
+            pools.append(("15m_pivot", val))
+    hourly_rows = snapshot.get("1h") or []
+    hour = candles(hourly_rows) if len(hourly_rows) >= 20 else []
+    if hour:
+        for val in _untouched_pivots(hour[:-1], target_side):
+            pools.append(("1h_pivot", val))
+    # Previous UTC day High/Low from 15m (or 1h) bars.
+    source = hour if len(hour) >= 48 else fifteen
+    cur_day = source[-1].ts // DAY_MS
+    prev_day_bars = [b for b in source if b.ts // DAY_MS == cur_day - 1]
+    if len(prev_day_bars) >= 4:
+        pools.append(("PDL" if side == "LONG" else "PDH",
+                      min(b.l for b in prev_day_bars) if side == "LONG" else max(b.h for b in prev_day_bars)))
+    # Monday High/Low from 1h bars if present in window.
+    if hour:
+        monday_bars = [
+            b for b in hour
+            if datetime.fromtimestamp(b.ts / 1000, tz=timezone.utc).weekday() == 0
+        ]
+        if len(monday_bars) >= 6:
+            latest_monday_day = monday_bars[-1].ts // DAY_MS
+            latest_monday = [b for b in monday_bars if b.ts // DAY_MS == latest_monday_day]
+            pools.append(("Monday_LOW" if side == "LONG" else "Monday_HIGH",
+                          min(b.l for b in latest_monday) if side == "LONG" else max(b.h for b in latest_monday)))
+    return pools
 
 
 def _build_signal(symbol, side, strategy, five, a5, rvol, spread, tick, stop_raw,
-                  checks, reason, d1, d3, ctx, room, entry_at_book=False):
+                  checks, reason, d1, d3, ctx, room, entry_at_book=False, extra_research=None):
     sign = 1 if side == "LONG" else -1
     entry = five[-1].c
     stop = price_round(stop_raw, tick, up=sign == -1)
@@ -103,6 +168,8 @@ def _build_signal(symbol, side, strategy, five, a5, rvol, spread, tick, stop_raw
         room_to_structure_r=round(room, 3),
         strategy_revision="standard-pro-v1",
     )
+    if extra_research:
+        signal.research.update(extra_research)
     return signal
 
 
@@ -161,6 +228,8 @@ def assess_pro(symbol, snapshot, tick_size, btc_snapshot, cfg):
     # Compression baseline: median range of the 8 bars preceding the trigger bar.
     prior_ranges = sorted(b.h - b.l for b in five[-9:-1])
     median_prior_range = (prior_ranges[3] + prior_ranges[4]) / 2
+    dvwap, dvwap_std = _daily_vwap(snapshot)
+    vwap_z = (last5.c - dvwap) / dvwap_std if dvwap is not None and dvwap_std > 0 else 0.0
 
     output = []
     for side in ("LONG", "SHORT"):
@@ -170,20 +239,28 @@ def assess_pro(symbol, snapshot, tick_size, btc_snapshot, cfg):
         # Setup A: Liquidity Sweep & Reclaim (SFP)
         prior_box = five[-22:-2]
         sweep_ref = min(b.l for b in prior_box) if sign == 1 else max(b.h for b in prior_box)
+        htf_pools = _htf_sweep_pools(snapshot, side)
+        wick_low = min(b.l for b in five[-2:])
+        wick_high = max(b.h for b in five[-2:])
+        swept_pools = [
+            name for name, lvl in htf_pools
+            if (wick_low < lvl - 0.05 * a5 and last5.c > lvl + 0.02 * a5
+                if sign == 1 else wick_high > lvl + 0.05 * a5 and last5.c < lvl - 0.02 * a5)
+        ]
         if sign == 1:
-            swept = min(b.l for b in five[-2:]) < sweep_ref - 0.05 * a5
+            swept = wick_low < sweep_ref - 0.05 * a5
             reclaimed = last5.c > sweep_ref + 0.05 * a5 and close_loc >= 0.65 and last5.c > last5.o
-            sfp_stop = min(b.l for b in five[-2:]) - 0.15 * a5
+            sfp_stop = wick_low - 0.15 * a5
         else:
-            swept = max(b.h for b in five[-2:]) > sweep_ref + 0.05 * a5
+            swept = wick_high > sweep_ref + 0.05 * a5
             reclaimed = last5.c < sweep_ref - 0.05 * a5 and close_loc <= 0.35 and last5.c < last5.o
-            sfp_stop = max(b.h for b in five[-2:]) + 0.15 * a5
+            sfp_stop = wick_high + 0.15 * a5
         sfp_vol = max(five[-1].v, five[-2].v) >= 1.35 * avg_vol if avg_vol > 0 else False
         flow_sfp, d1, d3 = _taker_flow(snapshot, side, 0.08, 0.03)
         not_runaway_against = ctx["regime"] == "RANGE" or sign * ctx["slope_atr"] >= -0.20
         sfp_room = _room_r(side, last5.c, max(1e-12, abs(last5.c - sfp_stop)), snapshot)
         sfp_checks = {
-            "liquidity sweep": bool(swept and reclaimed),
+            "liquidity sweep": bool((swept and reclaimed) or (swept_pools and close_loc >= 0.65 if sign == 1 else swept_pools and close_loc <= 0.35)),
             "sweep volume": bool(sfp_vol),
             "taker flow": bool(flow_sfp),
             "btc alignment": bool(btc_ok),
@@ -193,15 +270,22 @@ def assess_pro(symbol, snapshot, tick_size, btc_snapshot, cfg):
             symbol, side, "pro-sfp-reclaim", five, a5, rvol, spread, tick_size,
             sfp_stop, sfp_checks, f"5m liquidity sweep & reclaim; btc={btc_reason}",
             d1, d3, ctx, sfp_room, entry_at_book=False,
+            extra_research={
+                "daily_vwap": round(dvwap, 8) if dvwap is not None else None,
+                "vwap_z": round(vwap_z, 3),
+                "liquidity_tier": "htf_pool" if swept_pools else "local_5m",
+                "swept_pools": sorted(set(swept_pools)),
+            },
         )
         sfp_sig.max_cost_r_override = cfg.pro_max_cost_r
         sfp_sig.max_hold_minutes_override = cfg.pro_max_hold_minutes
         sfp_sig.max_spread_bps_override = max_spread
         output.append(sfp_sig)
 
-        # Setup B: Volatility Compression -> Expansion Breakout (TREND regime only)
+        # Setup B: Volatility Compression -> Expansion Breakout (TREND regime + Daily VWAP aligned)
         trend_15m = sign * (fifteen[-1].c - e21_15) > 0 and sign * (e21_15 - e50_15) > 0
         trend_1h = True if e21_1h is None else sign * (hour[-1].c - e21_1h) > 0
+        vwap_ok = True if dvwap is None else (sign * (last5.c - dvwap) > 0 and (dvwap_std <= 0 or abs(vwap_z) <= 2.5))
         compressed = median_prior_range <= 0.90 * a5
         consolidation = five[-13:-1]
         break_level = max(b.h for b in consolidation) if sign == 1 else min(b.l for b in consolidation)
@@ -215,6 +299,7 @@ def assess_pro(symbol, snapshot, tick_size, btc_snapshot, cfg):
         vcp_room = _room_r(side, last5.c, max(1e-12, abs(last5.c - vcp_stop)), snapshot)
         vcp_checks = {
             "trend regime": bool(ctx["regime"] == "TREND" and trend_15m and trend_1h),
+            "daily vwap": bool(vwap_ok),
             "volatility compression": bool(compressed),
             "expansion breakout": bool(broke and strong_bar and not_extended),
             "breakout volume": bool(rvol >= 1.40),
@@ -223,8 +308,12 @@ def assess_pro(symbol, snapshot, tick_size, btc_snapshot, cfg):
         }
         vcp_sig = _build_signal(
             symbol, side, "pro-vcp-trend", five, a5, rvol, spread, tick_size,
-            vcp_stop, vcp_checks, f"TREND 15m/1h aligned compression breakout; btc={btc_reason}",
+            vcp_stop, vcp_checks, f"TREND 15m/1h+VWAP aligned compression breakout; btc={btc_reason}",
             d1_vcp, d3_vcp, ctx, vcp_room, entry_at_book=True,
+            extra_research={
+                "daily_vwap": round(dvwap, 8) if dvwap is not None else None,
+                "vwap_z": round(vwap_z, 3),
+            },
         )
         vcp_sig.max_cost_r_override = cfg.pro_max_cost_r
         vcp_sig.max_hold_minutes_override = cfg.pro_max_hold_minutes
