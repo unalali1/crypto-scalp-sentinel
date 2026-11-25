@@ -319,6 +319,85 @@ class StandardProShadowTests(unittest.TestCase):
         result = detect_confluences("BTCUSDT", {"4h": rows}, "0.01", timeframes=("4h",))
         self.assertIsInstance(result, list)
 
+    def test_pro_telegram_enabled_sends_shadow_test_alert(self):
+        eth = _base_snapshot("LONG", setup="sfp")
+        btc = _base_snapshot("LONG", setup="vcp")
+
+        class Client:
+            def symbol_info(self):
+                return {
+                    sym: {"contractType": "PERPETUAL", "filters": [{"filterType": "PRICE_FILTER", "tickSize": "0.01"}]}
+                    for sym in ("ETHUSDT", "BTCUSDT")
+                }
+
+            def scalp_snapshot(self, symbol, asof, deadline=None):
+                return copy.deepcopy(btc if symbol == "BTCUSDT" else eth)
+
+            def get(self, path, **kwargs):
+                if path.endswith("/time"):
+                    return {"serverTime": NOW}
+                if path.endswith("/ticker/bookTicker"):
+                    return [dict(eth["book"], symbol="ETHUSDT"), dict(btc["book"], symbol="BTCUSDT")]
+                return {}
+
+        cfg = _pro_cfg(symbols=("ETHUSDT", "BTCUSDT"), dry_run=False, pro_telegram_enabled=True,
+                       telegram_token="tok", telegram_chat_id="chat", database_url="")
+        with patch("scalp_sentinel.main.Cooldowns") as storage_cls:
+            from scalp_sentinel.storage import Cooldowns
+            storage_cls.side_effect = lambda *_a: Cooldowns("", True)
+            r = Runner(cfg, Client())
+        try:
+            with patch("scalp_sentinel.main.time.time", return_value=NOW / 1000), \
+                 patch("scalp_sentinel.main.send_telegram") as send, \
+                 patch("scalp_sentinel.main.track_signals"):
+                sent = r.tick(NOW)
+            self.assertEqual(sent, 0)
+            self.assertEqual(send.call_count, 2)
+            self.assertIn("[SHADOW TEST]", send.call_args_list[0].args[2])
+        finally:
+            r.close()
+
+    def test_proximity_confluence_warns_when_approaching_and_throttles(self):
+        from scalp_sentinel.confluence import format_confluence_proximity_digest, nearby_confluence_alerts
+        fake_zone = {
+            "alert_id": "BTCUSDT:4h:LONG:100", "symbol": "BTCUSDT", "side": "LONG",
+            "timeframe": "4h", "indicators": ["RSI", "MACD"], "pivot": 58500.0,
+            "zone_low": 58400.0, "zone_high": 58600.0, "price": 58500.0, "atr": 400.0,
+            "pivot_ts": 100, "age_bars": 2,
+        }
+        ts5 = _aligned_ts(10, 300000)
+        # Price moving down from 59000 -> 58800 (approaching 58600 support zone).
+        five_approaching = [_bar(t, 59000 - i * 20, 59050, 58750, 59000 - i * 20) for i, t in enumerate(ts5)]
+        snap = {
+            "5m": five_approaching,
+            "book": {"bidPrice": "58795", "askPrice": "58805"},
+        }
+        with patch("scalp_sentinel.confluence.detect_confluences", return_value=[fake_zone]):
+            alerts = nearby_confluence_alerts("BTCUSDT", snap, "0.1")
+            self.assertEqual(len(alerts), 1)
+            self.assertEqual(alerts[0]["role"], "Destek bölgesi")
+            msg = format_confluence_proximity_digest(alerts, "Asia/Shanghai")
+            self.assertIn("YAKLAŞAN KONFLUENS BÖLGESİ", msg)
+            self.assertIn("58,400–58,600", msg)
+
+            # Moving away (upward) or too far should not alert.
+            snap["book"] = {"bidPrice": "60500", "askPrice": "60510"}
+            self.assertEqual(nearby_confluence_alerts("BTCUSDT", snap, "0.1"), [])
+
+            # Runner proximity_context_tick sends once and throttles repeat ticks while near zone.
+            snap["book"] = {"bidPrice": "58795", "askPrice": "58805"}
+            r = Runner.__new__(Runner)
+            r.cfg = _pro_cfg(symbols=("BTCUSDT",), dry_run=False, telegram_token="tok", telegram_chat_id="chat")
+            from scalp_sentinel.journal import Journal
+            r.journal = Journal()
+            r.exchange = {"BTCUSDT": {"filters": [{"filterType": "PRICE_FILTER", "tickSize": "0.1"}]}}
+            r.snapshots = {"BTCUSDT": snap}
+            r.client = type("C", (), {"context_candles": lambda *_a: [[0, "100", "101", "99", "100", "10", 1]] * 60})()
+            with patch("scalp_sentinel.main.send_telegram") as send:
+                self.assertEqual(r.proximity_context_tick(["BTCUSDT"], NOW), 1)
+                self.assertEqual(r.proximity_context_tick(["BTCUSDT"], NOW + 300000), 0)
+                self.assertEqual(send.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

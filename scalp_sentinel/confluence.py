@@ -140,7 +140,7 @@ def _confirmed_pivots(values,mode):
     return pivots
 
 
-def _series_divergences(rows):
+def _series_divergences(rows, max_age=MAX_CONFIRMATION_AGE):
     closes=[float(r[4]) for r in rows]
     highs=[float(r[2]) for r in rows]
     lows=[float(r[3]) for r in rows]
@@ -165,7 +165,7 @@ def _series_divergences(rows):
         if older is None:
             continue
         age=len(rows)-1-(current+PIVOT_RIGHT)
-        if age<0 or age>MAX_CONFIRMATION_AGE:
+        if age<0 or age>max_age:
             continue
         price_div=(closes[current]<closes[older] if side=="LONG"
                    else closes[current]>closes[older])
@@ -184,7 +184,8 @@ def _series_divergences(rows):
     return output
 
 
-def detect_confluences(symbol,snapshot,tick_size,timeframes=("4h","1d")):
+def detect_confluences(symbol,snapshot,tick_size,timeframes=("4h","1d"),
+                       max_age=MAX_CONFIRMATION_AGE,max_distance_atr=MAX_DISTANCE_ATR):
     """Find non-repainting divergence + nearby confirmed-pivot confluence zones."""
     alerts=[]
     for timeframe in timeframes:
@@ -196,9 +197,9 @@ def detect_confluences(symbol,snapshot,tick_size,timeframes=("4h","1d")):
             continue
         price=float(rows[-1][4])
         half=max(atr*ZONE_ATR,price*0.0005)
-        for side,pivot_i,indicators,age in _series_divergences(rows):
+        for side,pivot_i,indicators,age in _series_divergences(rows,max_age=max_age):
             pivot=float(rows[pivot_i][4])
-            if abs(price-pivot)>atr*MAX_DISTANCE_ATR:
+            if max_distance_atr is not None and abs(price-pivot)>atr*max_distance_atr:
                 continue
             tick=float(tick_size)
             low=price_round(max(tick,pivot-half),tick_size,up=False)
@@ -212,6 +213,63 @@ def detect_confluences(symbol,snapshot,tick_size,timeframes=("4h","1d")):
                 "pivot_ts":pivot_ts,"age_bars":age,
             })
     return alerts
+
+
+def _current_spot(snapshot):
+    book=snapshot.get("book") or {}
+    try:
+        bid,ask=float(book["bidPrice"]),float(book["askPrice"])
+        if bid>0 and ask>=bid:
+            return (bid+ask)/2
+    except (KeyError,TypeError,ValueError):
+        pass
+    rows=snapshot.get("5m") or snapshot.get("1m") or []
+    return float(rows[-1][4]) if rows else 0.0
+
+
+def nearby_confluence_alerts(symbol,snapshot,tick_size,timeframes=("4h","1d")):
+    """Return 4h/1d divergence zones only when live price approaches or enters them."""
+    price=_current_spot(snapshot)
+    if price<=0:
+        return []
+    five=snapshot.get("5m") or []
+    recent_closes=[float(r[4]) for r in five[-6:]] if len(five)>=2 else []
+    movement=price-recent_closes[0] if recent_closes else 0.0
+    zones=detect_confluences(symbol,snapshot,tick_size,timeframes=timeframes,
+                             max_age=24,max_distance_atr=None)
+    out=[]
+    for zone in zones:
+        low,high,atr=zone["zone_low"],zone["zone_high"],zone["atr"]
+        buffer=max(atr*0.60,price*0.004)
+        if price>high:
+            distance=price-high
+            if distance>buffer or movement>=0:
+                continue
+            role,approach="Destek bölgesi","Yukarıdan desteğe yaklaşıyor"
+        elif price<low:
+            distance=low-price
+            if distance>buffer or movement<=0:
+                continue
+            role,approach="Direnç bölgesi","Aşağıdan dirence yaklaşıyor"
+        else:
+            distance=0.0
+            role=("Destek bölgesi" if zone["side"]=="LONG" else "Direnç bölgesi")
+            approach="Bölge içinde"
+        pct=distance/price*100 if price>0 else 0.0
+        out.append(dict(
+            zone,
+            zone_id=zone["alert_id"],
+            zone_key=zone["alert_id"],
+            low=low,
+            high=high,
+            atr1h=atr,
+            price=price,
+            distance=distance,
+            distance_pct=pct,
+            role=role,
+            approach=approach,
+        ))
+    return out
 
 
 def format_confluence_alert(alert,tz):
@@ -241,4 +299,19 @@ def format_confluence_digest(alerts,tz):
             f"{', '.join(alert['indicators'])}"
         )
     lines.extend(["", "Bu bir işlem sinyali değildir; giriş, stop ve hedef içermez."])
+    return "\n".join(lines)
+
+
+def format_confluence_proximity_digest(alerts,tz):
+    """Advance warning digest when price approaches a 4h or 1d confluence zone."""
+    lines=["🧭 YAKLAŞAN KONFLUENS BÖLGESİ (4H / 1D)", ""]
+    for alert in sorted(alerts,key=lambda item:(item["symbol"],item["timeframe"],item["distance"])):
+        icon="🟢" if alert["side"]=="LONG" else "🔴"
+        dist_txt="Bölge içinde" if alert["distance"]==0 else f"{alert['distance']:,.8g} (%{alert['distance_pct']:.2f})"
+        lines.append(
+            f"{icon} {alert['symbol']} · {alert['timeframe']} · {alert['role']} ({alert['approach']})\n"
+            f"   Bölge: {alert['zone_low']:,.8g}–{alert['zone_high']:,.8g} | Güncel: {alert['price']:,.8g} | Mesafe: {dist_txt}\n"
+            f"   Uyumsuzluk: {', '.join(alert['indicators'])}"
+        )
+    lines.extend(["", "Önden bilgilendirme amaçlıdır; giriş/stop içeren işlem sinyali değildir."])
     return "\n".join(lines)
