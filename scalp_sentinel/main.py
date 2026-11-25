@@ -12,9 +12,10 @@ from .config import Config
 from .engine import evaluate, prefilter_rejections
 from .execution import prepare
 from .journal import Journal, SCORE_LOW_COHORT
-from .notifier import format_signal, send_telegram
+from .notifier import format_pro_signal, format_signal, send_telegram
 from .research import candidate_v3, correlated, regime, v2_shadow_variants
-from .confluence import detect_confluences, format_confluence_digest
+from .confluence import (detect_confluences, format_confluence_digest,
+                         format_confluence_proximity_digest, nearby_confluence_alerts)
 from .price_zones import (detect_price_zones, nearby_zone_alert,
                            format_price_zone_digest, current_price)
 from .storage import Cooldowns
@@ -409,7 +410,10 @@ class Runner:
         self.journal.record_standard_scan(bucket*300000,metrics)
         log.info('standard_scan_finished symbols=%d assessed=%d eligible=%d delivered=%d failed=%d duration_ms=%d reasons=%s',
                  len(symbols),assessed,eligible,delivered,len(failures),duration,json.dumps(reasons,sort_keys=True))
-        self.long_context_tick(symbols,now_ms)
+        if pro:
+            self.proximity_context_tick(symbols,now_ms)
+        else:
+            self.long_context_tick(symbols,now_ms)
         return delivered
 
     def standard_decision(self, signal, now_ms, reason):
@@ -471,6 +475,12 @@ class Runner:
             sig.journal.update(shadow_only=True,notification_policy='pro-shadow-v1')
             self.journal.add_shadow(PRO_COHORT,sig,decision_ms)
             recorded+=1
+            if getattr(self.cfg,'pro_telegram_enabled',False) and not self.cfg.dry_run:
+                try:
+                    send_telegram(self.cfg.telegram_token,self.cfg.telegram_chat_id,
+                                  format_pro_signal(sig,self.cfg.timezone))
+                except Exception as exc:
+                    log.warning('pro_shadow_telegram_failed symbol=%s kind=%s',sig.symbol,type(exc).__name__)
             log.info('pro_shadow_recorded cohort=%s symbol=%s side=%s setup=%s quality=%.2f cost_r=%.3f regime=%s',
                      PRO_COHORT,sig.symbol,sig.side,sig.strategy_version,
                      getattr(sig,'quality_score',0.0),sig.journal.get('estimated_cost_r',0.0),
@@ -486,6 +496,52 @@ class Runner:
         self.journal.track_shadows(self.client,now_ms)
         from .forward_report import maintain_reports
         maintain_reports(self,now_ms)
+
+    def proximity_context_tick(self, symbols, now_ms):
+        """Alert in advance when live price approaches a 4h or 1d confluence zone."""
+        if not hasattr(self.client, 'context_candles'):
+            return 0
+        alerts = []
+        for sym in symbols:
+            snap = self.snapshots.get(sym)
+            if not snap or sym not in self.exchange:
+                continue
+            tick = next(f['tickSize'] for f in self.exchange[sym]['filters'] if f['filterType'] == 'PRICE_FILTER')
+            ctx_snap = dict(snap)
+            for tf in ('4h', '1d'):
+                if tf not in ctx_snap:
+                    try:
+                        ctx_snap[tf] = self.client.context_candles(sym, tf, now_ms)
+                    except Exception:
+                        ctx_snap[tf] = []
+            found = nearby_confluence_alerts(sym, ctx_snap, tick, timeframes=('4h', '1d'))
+            if found:
+                spot = found[0]['price']
+                self.journal.observe_price_zones(sym, found, spot, now_ms)
+                for alert in found:
+                    if self.cfg.dry_run:
+                        log.info('DRY_RUN proximity_confluence symbol=%s tf=%s role=%s dist=%.6g',
+                                 sym, alert['timeframe'], alert['role'], alert['distance'])
+                    elif self.journal.claim_price_zone(alert, now_ms):
+                        alerts.append(alert)
+        if not alerts:
+            return 0
+        sent = 0
+        dest = self.cfg.context_chat_id or self.cfg.telegram_chat_id
+        for start in range(0, len(alerts), 10):
+            group = alerts[start:start + 10]
+            try:
+                send_telegram(self.cfg.telegram_token, dest,
+                              format_confluence_proximity_digest(group, self.cfg.timezone))
+                for a in group:
+                    self.journal.price_zone_delivery(a, 'sent')
+                sent += 1
+            except Exception as exc:
+                for a in group:
+                    self.journal.price_zone_delivery(a, 'uncertain')
+                log.warning('proximity_confluence_delivery_failed kind=%s', type(exc).__name__)
+        log.info('proximity_confluence_sent items=%d digests=%d', len(alerts), sent)
+        return sent
 
     def long_context_tick(self,symbols,now_ms):
         """Sample 4h/daily context at UTC close +5m, retrying delayed data."""

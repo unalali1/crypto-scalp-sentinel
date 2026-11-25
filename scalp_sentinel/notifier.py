@@ -105,6 +105,33 @@ def format_standard_signal(s,tz):
     return '\n'.join(lines)
 
 
+def format_pro_signal(s, tz):
+    """Format a [SHADOW TEST] Telegram alert for standard-pro-v1."""
+    p = s.journal
+    price = lambda value: fmt_price(value, s.tick_size)
+    expires = datetime.fromtimestamp(p['expires_at_ms'] / 1000, tz=timezone.utc).astimezone(ZoneInfo(tz))
+    setup_name = 'SFP Likidite Süpürme & Reclaim' if s.strategy_version == 'pro-sfp-reclaim' else 'VCP Trend Sıkışma Kırılımı'
+    title = '🟢 LONG' if s.side == 'LONG' else '🔴 SHORT'
+    vwap_line = f"Daily VWAP: {price(p['daily_vwap'])} (z={p.get('vwap_z', 0):+.2f})" if p.get('daily_vwap') else "Daily VWAP: —"
+    pools = ', '.join(p.get('swept_pools') or [])
+    pool_line = f"Süpürülen HTF Havuz: {pools}" if pools else f"Likidite katmanı: {p.get('liquidity_tier', 'trend')}"
+    lines = [
+        f"🧪 [SHADOW TEST] {title} | {s.symbol} | {setup_name}",
+        f"Kohort: standard-pro-v1 | Puan: {p.get('quality_score', 0):.1f}/100 | Rejim: {p.get('regime', '?')}",
+        f"Taker Delta (5dk/15dk): {p.get('taker_delta_1', 0):+.2f} / {p.get('taker_delta_3', 0):+.2f} | RVOL: {s.rvol:.2f}x",
+        f"{vwap_line} | {pool_line}",
+        "",
+        f"Limit giriş referansı: {price(s.entry)} USDT (bid/ask: {price(p['bid'])} / {price(p['ask'])})",
+        f"Stop: {price(s.stop)} | Risk: %{abs(s.entry - s.stop) / s.entry * 100:.2f}",
+        f"TP1 ({p.get('tp1_r', 1.1):g}R, %50): {price(s.tp1)} | TP2 ({p.get('tp2_r', 2.0):g}R, %50): {price(s.tp2)}",
+        f"Geçerlilik: {expires:%H:%M:%S} ({tz}) | Azami takip: {p['max_hold_ms'] // 60000} dk",
+        f"Spread: {p['spread_bps']:.2f} bp | Tahmini maliyet: {p['estimated_cost_r']:.3f}R | Net TP1 R:R: {p['estimated_net_tp1_rr']:.2f}",
+        "",
+        "Bu yeni stratejinin canlı test (shadow) bildirimidir; sonuçları veritabanında izlenir.",
+    ]
+    return "\n".join(lines)
+
+
 def send_telegram(token, chat_id, message):
     try:
         response = requests.post(
