@@ -51,6 +51,14 @@ class Config:
     standard_exit_shadows: bool = True
     daily_summary_enabled: bool = False
     daily_summary_hour: int = 8
+    primary_notifications_paused: bool = False
+    standard_pro_shadow: bool = True
+    pro_max_cost_r: float = 0.20
+    pro_max_hold_minutes: int = 90
+    pro_max_spread_bps: float = 5.0
+    pro_min_quote_volume_usdt: float = 25_000_000.0
+    pro_correlation_threshold: float = 0.75
+    scan_workers: int = 8
 
     def validate(self):
         from math import isfinite
@@ -64,6 +72,12 @@ class Config:
             raise ValueError("REGIME_FILTER_MODE must be shadow or enforce")
         if not 10 <= self.scan_budget_seconds <= 60 or not 0 <= self.daily_summary_hour <= 23:
             raise ValueError("Invalid scan/report timing")
+        if not 1 <= self.scan_workers <= 16:
+            raise ValueError("SCAN_WORKERS must be between 1 and 16")
+        if not 0 < self.pro_max_cost_r <= .5 or not 30 <= self.pro_max_hold_minutes <= 1440:
+            raise ValueError("Invalid pro shadow limits")
+        if self.pro_max_spread_bps <= 0 or self.pro_min_quote_volume_usdt <= 0 or not .5 <= self.pro_correlation_threshold <= 1:
+            raise ValueError("Invalid pro shadow filters")
         if not .25 <= self.risk_per_trade_pct <= .5:
             raise ValueError("RISK_PER_TRADE_PCT must be .25 to .50")
         if self.primary_strategy not in ("v2.1", "v3", "standard"):
@@ -128,5 +142,13 @@ class Config:
             standard_exit_shadows=bool_env("STANDARD_EXIT_SHADOWS", True),
             daily_summary_enabled=bool_env("DAILY_SUMMARY_ENABLED", False),
             daily_summary_hour=int(os.getenv("DAILY_SUMMARY_HOUR", 8)),
+            primary_notifications_paused=bool_env("PRIMARY_NOTIFICATIONS_PAUSED", False),
+            standard_pro_shadow=bool_env("STANDARD_PRO_SHADOW", True),
+            pro_max_cost_r=float(os.getenv("PRO_MAX_COST_R", .20)),
+            pro_max_hold_minutes=int(os.getenv("PRO_MAX_HOLD_MINUTES", 90)),
+            pro_max_spread_bps=float(os.getenv("PRO_MAX_SPREAD_BPS", 5.0)),
+            pro_min_quote_volume_usdt=float(os.getenv("PRO_MIN_QUOTE_VOLUME_USDT", 25_000_000)),
+            pro_correlation_threshold=float(os.getenv("PRO_CORRELATION_THRESHOLD", .75)),
+            scan_workers=int(os.getenv("SCAN_WORKERS", 8)),
         )
 

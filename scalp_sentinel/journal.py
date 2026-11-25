@@ -520,10 +520,11 @@ class Journal:
         self.conn.execute("DELETE FROM scalp_setup_claims WHERE claimed_ms<%s AND (delivery='sent' OR cohort<>'primary')",(cutoff,))
         self.conn.execute("DELETE FROM scalp_confluence_alerts WHERE ctid IN (SELECT ctid FROM scalp_confluence_alerts WHERE detected_ms<%s LIMIT 10000)",(cutoff,))
         self.conn.execute("DELETE FROM scalp_price_zone_alerts WHERE ctid IN (SELECT ctid FROM scalp_price_zone_alerts WHERE detected_ms<%s LIMIT 10000)",(cutoff,))
-        # Compact paired exit experiments; primary history and daily reports stay.
+        # Compact paired exit experiments; primary, score-study and pro-shadow histories stay.
         self.conn.execute("""DELETE FROM scalp_shadow_outcomes WHERE ctid IN (
             SELECT ctid FROM scalp_shadow_outcomes WHERE cohort LIKE 'standard-%%'
             AND cohort<>'standard-score-v1-low'
+            AND cohort NOT LIKE 'standard-pro-%%'
             AND sent_at_ms<%s AND status NOT IN (%s,%s,%s)
             AND trade->'journal_json'->>'costs_complete'='true' LIMIT 10000)""",(cutoff,*ACTIVE))
         self.conn.commit()

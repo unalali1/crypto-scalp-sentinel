@@ -21,6 +21,7 @@ from .storage import Cooldowns
 from .tracker import track_signals
 from .standard import assess as assess_standard
 from .standard_quality import enhanced, rank
+from .standard_shadow_pro import PRO_COHORT, assess_pro, select_pro_candidates
 
 log=logging.getLogger('sentinel')
 
@@ -312,9 +313,10 @@ class Runner:
         # Never reuse a previous scan's failed/missing correlation context.
         self.snapshots={}
         peers=self.journal.active('primary')+self.journal.active(SCORE_LOW_COHORT)
+        pro_peers=self.journal.active(PRO_COHORT) if pro and getattr(self.cfg,'standard_pro_shadow',False) else []
         wanted=set(symbols)
         if pro:
-            wanted.update(p['symbol'] for p in peers)
+            wanted.update(p['symbol'] for p in peers+pro_peers)
             if 'BTCUSDT' in self.exchange:
                 wanted.add('BTCUSDT')
         candidates=[]
@@ -322,7 +324,8 @@ class Runner:
         failures=[]
         reasons={}
         deadline=started+self.cfg.scan_budget_seconds
-        pool=ThreadPoolExecutor(max_workers=3)
+        workers=getattr(self.cfg,'scan_workers',8) if pro else 3
+        pool=ThreadPoolExecutor(max_workers=workers)
         jobs={pool.submit(self.client.scalp_snapshot,s,now_ms,deadline):s
               for s in sorted(wanted)} if pro else {
               pool.submit(self.client.scalp_snapshot,s,now_ms):s for s in symbols}
@@ -372,7 +375,8 @@ class Runner:
         # No candidate is sent during asynchronous arrival processing.
         self.standard_decisions=[]
         fresh_books={}
-        if pro and candidates:
+        pro_shadow_enabled=pro and getattr(self.cfg,'standard_pro_shadow',False)
+        if pro and (candidates or pro_shadow_enabled):
             try:
                 books=self.client.get('/fapi/v1/ticker/bookTicker')
                 fresh_books={b['symbol']:b for b in books} if isinstance(books,list) else {}
@@ -391,6 +395,8 @@ class Runner:
                 rank(signal,self.snapshots[signal.symbol],self.snapshots,peers,self.cfg)
             ready.append(signal)
         delivered=self.deliver(ready,'primary',now_ms)
+        if pro_shadow_enabled:
+            self.run_pro_shadows(symbols,fresh_books,pro_peers,now_ms)
         self.full_bucket=bucket
         duration=int((time.monotonic()-started)*1000)
         metrics=dict(symbols=len(symbols),assessed=assessed,eligible=eligible,
@@ -412,6 +418,65 @@ class Runner:
                 strategy=signal.strategy_version,reason=reason,
                 quality_score=getattr(signal,'quality_score',None)))
         self.journal.decision(signal,'primary',now_ms,reason)
+
+    def run_pro_shadows(self, symbols, fresh_books, pro_peers, now_ms):
+        """Evaluate and paper-record the improved shadow cohort independently of primary delivery."""
+        btc=self.snapshots.get('BTCUSDT')
+        assessed=eligible=recorded=0
+        reasons={}
+        ready=[]
+        for sym in symbols:
+            snap=self.snapshots.get(sym)
+            if not snap or sym not in self.exchange:
+                continue
+            if '1h' not in snap and hasattr(self.client,'hourly_candles'):
+                try:
+                    snap['1h']=self.client.hourly_candles(sym,now_ms)
+                except Exception:
+                    snap['1h']=[]
+            tick=next(f['tickSize'] for f in self.exchange[sym]['filters'] if f['filterType']=='PRICE_FILTER')
+            try:
+                signals,prefilter=assess_pro(sym,snap,tick,btc,self.cfg)
+            except Exception as exc:
+                reasons['pro_eval_error']=reasons.get('pro_eval_error',0)+1
+                log.warning('pro_shadow_eval_failed symbol=%s kind=%s',sym,type(exc).__name__)
+                continue
+            for reason in prefilter:
+                reasons[reason]=reasons.get(reason,0)+1
+            for sig in signals:
+                assessed+=1
+                for name,passed in sig.checks.items():
+                    if not passed:
+                        reasons[name]=reasons.get(name,0)+1
+                if not sig.eligible:
+                    continue
+                eligible+=1
+                book=fresh_books.get(sym) or snap.get('book',{})
+                decision_ms=int(time.time()*1000)
+                reason=prepare(sig,book,decision_ms,self.cfg)
+                if reason:
+                    reasons[reason]=reasons.get(reason,0)+1
+                    continue
+                snap['book']=book
+                rank(sig,snap,self.snapshots,pro_peers,self.cfg)
+                ready.append(sig)
+        for sig,block_reason in select_pro_candidates(ready,pro_peers,self.snapshots,self.cfg.pro_correlation_threshold):
+            if block_reason:
+                reasons[block_reason]=reasons.get(block_reason,0)+1
+                continue
+            decision_ms=int(time.time()*1000)
+            if not self.journal.claim(PRO_COHORT,sig,decision_ms):
+                reasons['pro_setup_already_used']=reasons.get('pro_setup_already_used',0)+1
+                continue
+            sig.journal.update(shadow_only=True,notification_policy='pro-shadow-v1')
+            self.journal.add_shadow(PRO_COHORT,sig,decision_ms)
+            recorded+=1
+            log.info('pro_shadow_recorded cohort=%s symbol=%s side=%s setup=%s quality=%.2f cost_r=%.3f regime=%s',
+                     PRO_COHORT,sig.symbol,sig.side,sig.strategy_version,
+                     getattr(sig,'quality_score',0.0),sig.journal.get('estimated_cost_r',0.0),
+                     sig.journal.get('regime','?'))
+        log.info('pro_shadow_scan cohort=%s assessed=%d eligible=%d ready=%d recorded=%d reasons=%s',
+                 PRO_COHORT,assessed,eligible,len(ready),recorded,json.dumps(reasons,sort_keys=True))
 
     def standard_maintenance(self,now_ms):
         if self.cfg.dry_run:
@@ -558,6 +623,12 @@ class Runner:
             else:
                 self.journal.decision(s,cohort,stamp,reason)
         delivery_started_ms=int(time.time()*1000)
+        if cohort=='primary' and getattr(cfg,'primary_notifications_paused',False):
+            for candidate in signals:
+                record_decision(candidate,delivery_started_ms,'primary_paused')
+            if signals:
+                log.info('primary_notifications_paused skipped=%d',len(signals))
+            return 0
         if cohort=='primary' and self.journal.pending_delivery():
             for candidate in signals:
                 record_decision(candidate,delivery_started_ms,'delivery_uncertain')
@@ -678,9 +749,9 @@ def main():
         if cfg.primary_strategy=='standard':
             log.info('standard_score_filter enabled=%s min_score=%.2f silent_cohort=%s',
                      cfg.standard_enhanced,cfg.standard_min_score,SCORE_LOW_COHORT)
-            log.info('standard_operating_config advisory_only=true daily_loss_gate=false portfolio_gates=false paper_cooldown=false signal_cap=false enhanced=%s regime_filter=%s illustrative_risk_pct=%.2f hold_minutes=%d daily_summary=%s report_hour=%d timezone=%s',
-                     cfg.standard_enhanced,cfg.regime_filter_mode,cfg.risk_per_trade_pct,cfg.max_hold_minutes,
-                     cfg.daily_summary_enabled,cfg.daily_summary_hour,cfg.timezone)
+            log.info('standard_operating_config advisory_only=true daily_loss_gate=false portfolio_gates=false paper_cooldown=false signal_cap=false enhanced=%s regime_filter=%s primary_paused=%s pro_shadow=%s illustrative_risk_pct=%.2f hold_minutes=%d daily_summary=%s report_hour=%d timezone=%s',
+                     cfg.standard_enhanced,cfg.regime_filter_mode,cfg.primary_notifications_paused,cfg.standard_pro_shadow,
+                     cfg.risk_per_trade_pct,cfg.max_hold_minutes,cfg.daily_summary_enabled,cfg.daily_summary_hour,cfg.timezone)
         failures=0
         while not stop.is_set():
             started=time.time()
