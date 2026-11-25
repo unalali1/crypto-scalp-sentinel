@@ -34,7 +34,7 @@ class BinanceClient:
             # Do not sleep an unbounded Retry-After inside a scanning worker.
             # Transient failures retry at the next scheduled scan.
             retry = Retry(total=0)
-            session.mount("https://", HTTPAdapter(max_retries=retry, pool_connections=8, pool_maxsize=8))
+            session.mount("https://", HTTPAdapter(max_retries=retry, pool_connections=16, pool_maxsize=16))
             session.headers.update({"User-Agent": "CryptoScalpSentinel/0.1"})
             self._local.session = session
         return session
@@ -112,19 +112,26 @@ class BinanceClient:
                 if not all(isfinite(x) for x in (o, h, l, c, v)) or l <= 0 or v < 0 or not l <= min(o, c) <= max(o, c) <= h:
                     raise BinanceError(f"{symbol} invalid {tf} candle")
             out[tf] = bars
+        if all(len(row) >= 10 for row in out["5m"][-40:]):
+            taker = []
+            for row in out["5m"][-40:]:
+                total, buy = float(row[5]), float(row[9])
+                if isfinite(buy) and 0 <= buy <= total:
+                    taker.append(dict(timestamp=int(row[0]), buyVol=buy, sellVol=total - buy))
+            if len(taker) == len(out["5m"][-40:]):
+                out["taker"] = taker
+                out["flow_source"] = "closed_5m_kline_taker_volume"
         out["ticker"] = self.cached((symbol, "standard", "ticker"), now_ms // 300000,
                                     "/fapi/v1/ticker/24hr", symbol=symbol)
         out["book"] = self.get("/fapi/v1/ticker/bookTicker", symbol=symbol)
         out["asof_ms"] = now_ms
         return out
 
-    def context_candles(self, symbol, timeframe, now_ms):
-        """Fetch and validate the latest fully closed 4h or UTC daily candle."""
-        durations = {"4h": 14400000, "1d": 86400000}
-        duration = durations[timeframe]
+    def _closed_candles(self, symbol, timeframe, duration, now_ms, limit=140):
+        """Fetch and validate closed candles for a given timeframe."""
         key = (symbol, "context", timeframe)
         rows = self.cached(key, now_ms // duration, "/fapi/v1/klines",
-                           symbol=symbol, interval=timeframe, limit=140)
+                           symbol=symbol, interval=timeframe, limit=limit)
         bars = [r for r in rows if int(r[6]) + 250 <= now_ms]
         expected_open = now_ms // duration * duration - duration
         if len(bars) < 60 or int(bars[-1][0]) != expected_open:
@@ -139,6 +146,15 @@ class BinanceClient:
             if not all(isfinite(x) for x in (o, h, l, c, v)) or l <= 0 or v < 0 or not l <= min(o, c) <= max(o, c) <= h:
                 raise BinanceError(f"{symbol} invalid {timeframe} candle")
         return bars
+
+    def hourly_candles(self, symbol, now_ms):
+        """Fetch and validate the latest fully closed 1h candles (cached hourly)."""
+        return self._closed_candles(symbol, "1h", 3_600_000, now_ms, limit=120)
+
+    def context_candles(self, symbol, timeframe, now_ms):
+        """Fetch and validate the latest fully closed 4h or UTC daily candle."""
+        durations = {"4h": 14400000, "1d": 86400000}
+        return self._closed_candles(symbol, timeframe, durations[timeframe], now_ms, limit=140)
 
     def snapshot(self, symbol, now_ms):
         durations = {"1m":60000,"5m":300000,"15m":900000,"1h":3600000,"4h":14400000,"1d":86400000,"1w":604800000}

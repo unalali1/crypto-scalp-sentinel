@@ -129,6 +129,10 @@ def format_digest(day, report):
     if 'review_ready' in comparison:
         lines.append(f"İlk karşılaştırma için 7 gün ve 100 tamamlanmış {comparison['threshold']:g}+ işlem: "+
                      ('hazır (kârlılık kanıtı değildir).' if comparison['review_ready'] else 'henüz tamamlanmadı.'))
+    for shadow in report.get('paired_shadows') or []:
+        if shadow.get('version')=='standard-pro-v1':
+            lines.append(f"Yeni shadow (standard-pro-v1): {shadow['signals']} fikir, {shadow['resolved']} sonuç; "
+                         f"giriş {shadow['filled']}/{shadow['signals']}, net R {fmt(shadow.get('mean_net_r_low'))}, PF {fmt(shadow.get('profit_factor_low'))}")
     lines.append('Sanal eşit risk hesabı; gerçek hesap getirisi değildir. Açık/eksik sonuç başarı sayılmaz.')
     return '\n'.join(lines)[:3900]
 

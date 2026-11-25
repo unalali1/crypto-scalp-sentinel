@@ -74,7 +74,8 @@ def prepare_standard(signal, book, now_ms, cfg):
     if not -2000 <= now_ms-timestamp <= 15000:
         return 'stale_quote'
     spread = (ask-bid)/((ask+bid)/2)*10000
-    if spread > cfg.max_spread_bps:
+    max_spread = getattr(signal, 'max_spread_bps_override', None) or cfg.max_spread_bps
+    if spread > max_spread:
         return 'spread'
     sign = 1 if signal.side == 'LONG' else -1
     reference = getattr(signal, 'reference_entry', signal.entry)
@@ -82,26 +83,33 @@ def prepare_standard(signal, book, now_ms, cfg):
     quote = ask if sign == 1 else bid
     if abs(quote-reference) > cfg.max_entry_drift_atr*signal.atr5:
         return 'price_drift'
-    entry = min(reference, bid) if sign == 1 else max(reference, ask)
+    if getattr(signal, 'entry_at_book', False):
+        entry = bid if sign == 1 else ask
+    else:
+        entry = min(reference, bid) if sign == 1 else max(reference, ask)
     entry = price_round(entry, signal.tick_size, up=sign == -1)
     risk = sign*(entry-signal.stop)
     if not isfinite(risk) or risk <= 0 or not cfg.min_stop_atr <= risk/signal.atr5 <= cfg.max_stop_atr:
         return 'invalid_stop'
     exit_bps = spread/2 + cfg.slippage_bps
     cost_r = (2*cfg.fee_bps+exit_bps)/10000*entry/risk
-    if cost_r > cfg.max_cost_r:
+    max_cost_r = getattr(signal, 'max_cost_r_override', None) or cfg.max_cost_r
+    if cost_r > max_cost_r:
         return 'cost_to_risk'
     market = price_round(quote*(1+sign*cfg.slippage_bps/10000), signal.tick_size, up=sign == 1)
     market_risk = sign*(market-signal.stop)
+    tp1_r = getattr(signal, 'tp1_r', 1.5)
+    tp2_r = getattr(signal, 'tp2_r', 2.5)
+    hold_minutes = getattr(signal, 'max_hold_minutes_override', None) or cfg.max_hold_minutes
     signal.entry = entry
-    signal.tp1 = price_round(entry+sign*1.5*risk, signal.tick_size, up=sign == 1)
-    signal.tp2 = price_round(entry+sign*2.5*risk, signal.tick_size, up=sign == 1)
+    signal.tp1 = price_round(entry+sign*tp1_r*risk, signal.tick_size, up=sign == 1)
+    signal.tp2 = price_round(entry+sign*tp2_r*risk, signal.tick_size, up=sign == 1)
     signal.spread_bps = spread
     signal.journal = dict(getattr(signal,'research',{}), cost_model='paper-v2',
         entry_mode='passive_limit', entry_window_ms=cfg.entry_window_minutes*60000,
-        max_hold_ms=cfg.max_hold_minutes*60000, invalidate_target_before_entry=True,
+        max_hold_ms=hold_minutes*60000, invalidate_target_before_entry=True,
         fee_bps=cfg.fee_bps, slippage_bps=cfg.slippage_bps, exit_friction_bps=exit_bps,
-        tp1_fraction=.5, decision_ms=now_ms, setup_id=signal.setup_id,
+        tp1_fraction=.5, tp1_r=tp1_r, tp2_r=tp2_r, decision_ms=now_ms, setup_id=signal.setup_id,
         quote_at_decision=quote, reference_entry=reference, spread_bps=spread,
         bid=bid, ask=ask, bid_qty=bq, ask_qty=aq,
         top_book_notional_usdt=min(bid*bq, ask*aq),
@@ -110,7 +118,7 @@ def prepare_standard(signal, book, now_ms, cfg):
         price_min=reference-cfg.max_entry_drift_atr*signal.atr5,
         price_max=reference+cfg.max_entry_drift_atr*signal.atr5,
         fill_delay_ms=30000, fill_penetration=float(signal.tick_size), tick_size=signal.tick_size,
-        estimated_cost_r=cost_r, estimated_net_tp1_rr=(1.5-cost_r)/(1+cost_r),
+        estimated_cost_r=cost_r, estimated_net_tp1_rr=(tp1_r-cost_r)/(1+cost_r),
         market_scenario=dict(entry=market, reference_drift_bps=sign*(market-reference)/reference*10000,
             cost_r=(2*cfg.fee_bps+exit_bps)/10000*market/market_risk if market_risk>0 else None,
             note='Indicative quote; delayed fill is tracked separately; no guaranteed execution'))
