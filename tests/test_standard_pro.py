@@ -119,7 +119,20 @@ class StandardProShadowTests(unittest.TestCase):
                 self.assertEqual(sig.journal["tp1_r"], 1.1)
                 self.assertEqual(sig.journal["tp2_r"], 2.0)
                 self.assertEqual(sig.journal["max_hold_ms"], 90 * 60000)
-                self.assertLessEqual(sig.journal["estimated_cost_r"], 0.20)
+                self.assertLessEqual(sig.journal["estimated_cost_r"], 0.25)
+
+    def test_sfp_accepts_negative_15m_delta_when_trigger_flips_positive(self):
+        cfg = _pro_cfg()
+        snap = _base_snapshot("LONG", setup="sfp")
+        btc = _base_snapshot("LONG", setup="vcp")
+        # Simulate heavy selling during stop-hunt bars (-3, -2), followed by positive reclaim (-1).
+        snap["taker"][-3] = {"timestamp": snap["taker"][-3]["timestamp"], "buyVol": 20.0, "sellVol": 80.0}
+        snap["taker"][-2] = {"timestamp": snap["taker"][-2]["timestamp"], "buyVol": 40.0, "sellVol": 140.0}
+        snap["taker"][-1] = {"timestamp": snap["taker"][-1]["timestamp"], "buyVol": 100.0, "sellVol": 60.0}
+        sig = next(s for s in assess_pro("ETHUSDT", snap, "0.01", btc, cfg)[0]
+                   if s.side == "LONG" and s.strategy_version == "pro-sfp-reclaim")
+        self.assertTrue(sig.checks["taker flow"])
+        self.assertTrue(sig.eligible, sig.checks)
 
     def test_vcp_trend_eligible_and_enters_at_top_of_book(self):
         cfg = _pro_cfg()

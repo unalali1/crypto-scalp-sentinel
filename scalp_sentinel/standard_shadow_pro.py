@@ -35,15 +35,19 @@ def _btc_aligned(side, symbol, btc_snapshot):
     return True, "aligned"
 
 
-def _taker_flow(snapshot, side, min_bar_delta, min_three_delta):
+def _taker_flow(snapshot, side, min_bar_delta, min_three_delta=None):
     """Validate closed-bar taker buy/sell imbalance from kline taker volume."""
     taker = snapshot.get("taker") or []
     if len(taker) < 6:
         return False, 0.0, 0.0
     sign = 1 if side == "LONG" else -1
     d1 = delta_ratio(taker[-1:])
+    prev_d1 = delta_ratio(taker[-2:-1])
     d3 = delta_ratio(taker[-3:])
-    ok = sign * d1 >= min_bar_delta and sign * d3 >= min_three_delta
+    if min_three_delta is None:
+        ok = sign * d1 >= min_bar_delta and sign * (d1 - prev_d1) > 0
+    else:
+        ok = sign * d1 >= min_bar_delta and sign * d3 >= min_three_delta
     return ok, d1, d3
 
 
@@ -256,7 +260,7 @@ def assess_pro(symbol, snapshot, tick_size, btc_snapshot, cfg):
             reclaimed = last5.c < sweep_ref - 0.05 * a5 and close_loc <= 0.35 and last5.c < last5.o
             sfp_stop = wick_high + 0.15 * a5
         sfp_vol = max(five[-1].v, five[-2].v) >= 1.35 * avg_vol if avg_vol > 0 else False
-        flow_sfp, d1, d3 = _taker_flow(snapshot, side, 0.08, 0.03)
+        flow_sfp, d1, d3 = _taker_flow(snapshot, side, 0.06, None)
         not_runaway_against = ctx["regime"] == "RANGE" or sign * ctx["slope_atr"] >= -0.20
         sfp_room = _room_r(side, last5.c, max(1e-12, abs(last5.c - sfp_stop)), snapshot)
         sfp_checks = {

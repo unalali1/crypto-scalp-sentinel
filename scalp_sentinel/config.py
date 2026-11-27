@@ -54,7 +54,7 @@ class Config:
     primary_notifications_paused: bool = False
     standard_pro_shadow: bool = True
     pro_telegram_enabled: bool = False
-    pro_max_cost_r: float = 0.20
+    pro_max_cost_r: float = 0.25
     pro_max_hold_minutes: int = 90
     pro_max_spread_bps: float = 5.0
     pro_min_quote_volume_usdt: float = 25_000_000.0
@@ -146,7 +146,7 @@ class Config:
             primary_notifications_paused=bool_env("PRIMARY_NOTIFICATIONS_PAUSED", False),
             standard_pro_shadow=bool_env("STANDARD_PRO_SHADOW", True),
             pro_telegram_enabled=bool_env("PRO_TELEGRAM_ENABLED", False),
-            pro_max_cost_r=float(os.getenv("PRO_MAX_COST_R", .20)),
+            pro_max_cost_r=float(os.getenv("PRO_MAX_COST_R", .25)),
             pro_max_hold_minutes=int(os.getenv("PRO_MAX_HOLD_MINUTES", 90)),
             pro_max_spread_bps=float(os.getenv("PRO_MAX_SPREAD_BPS", 5.0)),
             pro_min_quote_volume_usdt=float(os.getenv("PRO_MIN_QUOTE_VOLUME_USDT", 25_000_000)),
